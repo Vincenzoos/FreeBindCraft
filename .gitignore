@@ -10,3 +10,5 @@ BindCraft-main-v1.5.code-workspace
 *.cc
 **/ColabDesign-main/
 ipSAE.py
+params
+
