@@ -11,4 +11,5 @@ BindCraft-main-v1.5.code-workspace
 **/ColabDesign-main/
 ipSAE.py
 params
-
+outputs/
+outputs.zip
