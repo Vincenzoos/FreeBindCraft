@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 import shutil
 import subprocess
 import sys
@@ -11,12 +10,9 @@ from pathlib import Path
 
 import pandas as pd
 
-
-ADDITIONS_DIR = Path(__file__).resolve().parent
-IPSAE_DIR = ADDITIONS_DIR.parent
-ROOT = IPSAE_DIR.parent.parent
-IPSAE_SCRIPT = IPSAE_DIR / "ipsae.py"
-DEFAULT_EVALS_DIR = ROOT / "ipsae_evals"
+from af3_pairing import validate_structure_pae_pairing
+from naming import ipsae_output_files, safe_name
+from paths import DEFAULT_EVALS_DIR, IPSAE_SCRIPT, ROOT, rel_repo_path, resolve_repo_path
 
 
 @dataclass(frozen=True)
@@ -28,121 +24,13 @@ class IpsaeJob:
     dist_cutoff: float = 10.0
 
 
-@dataclass(frozen=True)
-class Af3PairInfo:
-    complex_id: str
-    model_index: int
-
-
-def _rel(path: Path) -> str:
-    try:
-        return str(path.relative_to(ROOT))
-    except ValueError:
-        return str(path)
-
-
-def resolve_repo_path(value: str | Path) -> Path:
-    path = Path(str(value)).expanduser()
-    if not path.is_absolute():
-        path = ROOT / path
-    return path.resolve()
-
-
-def ipsae_output_stem(structure_file: Path, pae_cutoff: float, dist_cutoff: float) -> Path:
-    pae_tag = f"{int(pae_cutoff):02d}" if pae_cutoff < 10 else str(int(pae_cutoff))
-    dist_tag = f"{int(dist_cutoff):02d}" if dist_cutoff < 10 else str(int(dist_cutoff))
-    stem = structure_file.with_suffix("")
-    return stem.with_name(f"{stem.name}_{pae_tag}_{dist_tag}")
-
-
-def ipsae_output_files(structure_file: Path, pae_cutoff: float, dist_cutoff: float) -> dict[str, Path]:
-    stem = ipsae_output_stem(structure_file, pae_cutoff, dist_cutoff)
-    return {
-        "scores": stem.with_suffix(".txt"),
-        "byres": Path(f"{stem}_byres.txt"),
-        "pymol": stem.with_suffix(".pml"),
-    }
-
-
-def _safe_name(value: str) -> str:
-    cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "_", value.strip())
-    return cleaned.strip("_") or "ipsae_model"
-
-
-def model_name_from_structure(structure_file: str | Path) -> str:
-    return _safe_name(Path(structure_file).stem)
-
-
-def _parse_af3_structure_pairing(structure_file: str | Path) -> Af3PairInfo | None:
-    match = re.match(r"^(?P<complex>.+)_model_(?P<index>\d+)$", Path(structure_file).stem)
-    if not match:
-        return None
-    return Af3PairInfo(
-        complex_id=match.group("complex"),
-        model_index=int(match.group("index")),
-    )
-
-
-def _parse_af3_pae_pairing(pae_file: str | Path) -> Af3PairInfo | None:
-    match = re.match(r"^(?P<complex>.+)_full_data_(?P<index>\d+)$", Path(pae_file).stem)
-    if not match:
-        return None
-    return Af3PairInfo(
-        complex_id=match.group("complex"),
-        model_index=int(match.group("index")),
-    )
-
-
-def validate_structure_pae_pairing(structure_file: str | Path, pae_file: str | Path) -> None:
-    """
-    Validate known structure/PAE naming schemes before running ipSAE.
-
-    Today this enforces AlphaFold 3 filename pairing and same-folder placement.
-    AF2/Boltz hooks are intentionally left as placeholders for future extension
-    when needed.
-    """
-    structure_path = Path(structure_file)
-    pae_path = Path(pae_file)
-    structure_name = structure_path.name
-    pae_name = pae_path.name
-
-    af3_structure = _parse_af3_structure_pairing(structure_file)
-    af3_pae = _parse_af3_pae_pairing(pae_file)
-    if af3_structure or af3_pae:
-        if not af3_structure or not af3_pae:
-            raise ValueError(
-                "AF3 structure/PAE mismatch: expected a structure like '*_model_N.cif' "
-                f"paired with a PAE file like '*_full_data_N.json'. Got '{structure_name}' "
-                f"and '{pae_name}'."
-            )
-        if af3_structure.complex_id != af3_pae.complex_id:
-            raise ValueError(
-                "AF3 structure/PAE mismatch: structure and PAE appear to come from "
-                f"different complexes ('{structure_name}' vs '{pae_name}')."
-            )
-        if af3_structure.model_index != af3_pae.model_index:
-            raise ValueError(
-                "AF3 structure/PAE mismatch: structure and PAE refer to different model "
-                f"indices for the same complex ('{structure_name}' vs '{pae_name}')."
-            )
-        if structure_path.resolve().parent != pae_path.resolve().parent:
-            raise ValueError(
-                "AF3 structure/PAE mismatch: structure and PAE must share the same parent folder. "
-                f"Got '{structure_path.resolve().parent}' and '{pae_path.resolve().parent}'."
-            )
-        return
-
-    # Placeholder for future AF2 pairing validation.
-    # Placeholder for future Boltz pairing validation.
-
-
 def collect_ipsae_outputs(
     job: IpsaeJob,
     output_dir: str | Path = DEFAULT_EVALS_DIR,
 ) -> dict[str, Path]:
     structure_file = resolve_repo_path(job.structure_file)
     source_files = ipsae_output_files(structure_file, job.pae_cutoff, job.dist_cutoff)
-    base = _safe_name(job.label)
+    base = safe_name(job.label)
     out_dir = resolve_repo_path(output_dir) / base
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -218,9 +106,9 @@ def run_ipsae(
     if "Model" in scores.columns:
         scores = scores.drop(columns=["Model"])
     scores.insert(0, "Model", job.label)
-    scores.insert(1, "PAE_File", _rel(pae_file))
-    scores.insert(2, "Structure_File", _rel(structure_file))
-    scores.insert(3, "Score_File", _rel(score_file))
+    scores.insert(1, "PAE_File", rel_repo_path(pae_file))
+    scores.insert(2, "Structure_File", rel_repo_path(structure_file))
+    scores.insert(3, "Score_File", rel_repo_path(score_file))
     if copied:
-        scores.insert(4, "Eval_Output_Dir", _rel(resolve_repo_path(output_dir)))
+        scores.insert(4, "Eval_Output_Dir", rel_repo_path(resolve_repo_path(output_dir)))
     return scores

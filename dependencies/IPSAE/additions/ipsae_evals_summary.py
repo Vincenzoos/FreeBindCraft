@@ -7,7 +7,9 @@ from pathlib import Path
 
 import pandas as pd
 
-from single_model_eval import _rel, _safe_name, parse_ipsae_scores, resolve_repo_path
+from naming import safe_name
+from paths import rel_repo_path, resolve_repo_path
+from single_model_eval import parse_ipsae_scores
 
 
 def best_ipsae_summary(scores: pd.DataFrame) -> pd.DataFrame:
@@ -62,14 +64,14 @@ def summarize_ipsae_folder(folder: str | Path) -> tuple[pd.DataFrame, pd.DataFra
             scores = parse_ipsae_scores(score_file)
             if "Model" in scores.columns:
                 scores = scores.drop(columns=["Model"])
-            model_name = _safe_name(score_file.parent.name)
-            if not model_name or model_name == _safe_name(root.name):
+            model_name = safe_name(score_file.parent.name)
+            if not model_name or model_name == safe_name(root.name):
                 model_name = re.sub(r"_\d+_\d+$", "", score_file.stem)
             scores.insert(0, "Model", model_name)
-            scores.insert(1, "Score_File", _rel(score_file))
+            scores.insert(1, "Score_File", rel_repo_path(score_file))
             frames.append(scores)
         except Exception as exc:
-            rows.append({"Score_File": _rel(score_file), "Error": str(exc)})
+            rows.append({"Score_File": rel_repo_path(score_file), "Error": str(exc)})
     all_scores = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     errors = pd.DataFrame(rows)
     if errors.empty:

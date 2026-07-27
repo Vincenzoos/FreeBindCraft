@@ -13,6 +13,10 @@ Original upstream IPSAE files remain in `dependencies/IPSAE/`:
 
 FreeBindCraft-added files live here in `dependencies/IPSAE/additions/`:
 
+- `paths.py`: repository root constants and path resolution helpers.
+- `naming.py`: model/output filename helpers for ipSAE runs.
+- `af3_pairing.py`: AlphaFold 3 structure/PAE filename pairing validation.
+- `ui_helpers.py`: shared ipywidgets styling and display helpers for notebook UIs.
 - `ipsae_eval_ui.py`: ipywidgets UI wiring for single-model and bulk evaluation.
 - `ipsae_comparison_ui.py`: ipywidgets UI for summarizing collected outputs into a comparison CSV.
 - `single_model_eval.py`: single-model execution, output collection, and score parsing.

@@ -15,73 +15,31 @@ from __future__ import annotations
 import threading
 from pathlib import Path
 
-try:
-    import ipywidgets as widgets
-    from IPython.display import HTML, clear_output, display, update_display
-except ImportError:  # Allows import in non-notebook contexts for tests/parsing.
-    widgets = None
-    clear_output = None
-    display = print
-    update_display = None
-    HTML = None
-
 from bulk_eval import discover_af3_models, new_bulk_output_dir, run_bulk_ipsae, write_bulk_run_log
-from single_model_eval import (
-    DEFAULT_EVALS_DIR,
-    IPSAE_SCRIPT,
-    IpsaeJob,
-    _rel,
-    _safe_name,
-    model_name_from_structure,
-    resolve_repo_path,
-    run_ipsae,
+from naming import model_name_from_structure, safe_name
+from paths import DEFAULT_EVALS_DIR, IPSAE_SCRIPT, rel_repo_path, resolve_repo_path
+from single_model_eval import IpsaeJob, run_ipsae
+from ui_helpers import (
+    ERR,
+    INFO,
+    OK,
+    SOFT,
+    banner,
+    clear_output,
+    display,
+    example,
+    html,
+    publish_cell,
+    warning,
+    widgets,
+    HTML,
 )
 
-BANNER = (
-    "background:#e8d5f5;padding:12px 16px;border-radius:6px;"
-    "margin:8px 0;font-family:sans-serif;"
-)
-SOFT = "color:#57606a;"
-OK = "color:#1a7f37;font-weight:600;"
-ERR = "color:#cf222e;font-weight:600;"
-INFO = "color:#0969da;"
-WARNING_CARD = (
-    "background:#fff8c5;border:1px solid #d4a72c;color:#5c4400;"
-    "padding:12px 16px;border-radius:6px;margin:8px 0;font-family:sans-serif;"
-)
-EXAMPLE_CARD = (
-    "background:#f6f8fa;border:1px solid #d0d7de;color:#24292f;"
-    "padding:12px 16px;border-radius:6px;margin:8px 0;font-family:monospace;"
-)
 AF3_SERVER_OUTPUT_URL = "https://www.ebi.ac.uk/training/online/courses/alphafold/alphafold-3-and-alphafold-server/alphafold-server-your-gateway-to-alphafold-3/interpreting-results-from-alphafold-server/"
 
 RESULT_MSG_ID = "ipsae-eval-result-msg"
 RESULT_TABLE_ID = "ipsae-eval-result-table"
 RESULT_EXTRA_ID = "ipsae-eval-result-extra"
-
-
-def _banner(text: str) -> "widgets.HTML":
-    return widgets.HTML(f'<div style="{BANNER}"><b>{text}</b></div>')
-
-
-def _html(text: str) -> "widgets.HTML":
-    return widgets.HTML(text)
-
-
-def _warning(text: str) -> "widgets.HTML":
-    return widgets.HTML(f'<div style="{WARNING_CARD}"><b>Warning:</b> {text}</div>')
-
-
-def _example(text: str) -> "widgets.HTML":
-    return widgets.HTML(f'<pre style="{EXAMPLE_CARD}">{text}</pre>')
-
-
-def _publish_cell(display_id: str, obj, initialized: set[str]) -> None:
-    if display_id in initialized:
-        update_display(obj, display_id=display_id)
-    else:
-        display(obj, display_id=display_id)
-        initialized.add(display_id)
 
 
 def launch_ipsae_eval_ui() -> None:
@@ -133,7 +91,7 @@ def launch_ipsae_eval_ui() -> None:
 
     single_panel = widgets.VBox(
         [
-            _html(
+            html(
                 f'<span style="{SOFT}">Provide one matching PAE/confidence file and one structure file. '
                 "This evaluates AF2, AF3, or Boltz predictions with saved PAE/confidence files only.</span>"
             ),
@@ -148,12 +106,12 @@ def launch_ipsae_eval_ui() -> None:
 
     bulk_panel = widgets.VBox(
         [
-            _html(
+            html(
                 f'<span style="{SOFT}">Enter an AlphaFold Server output folder. The UI will discover matching '
                 "model_N CIF files and full_data_N JSON files across all complex subfolders before running.</span>"
             ),
-            _warning("Boltz folder structure is not supported in bulk mode yet. Use Single Model for Boltz, or provide an AlphaFold Server-style export folder here."),
-            _example(
+            warning("Boltz folder structure is not supported in bulk mode yet. Use Single Model for Boltz, or provide an AlphaFold Server-style export folder here."),
+            example(
                 "Expected AlphaFold Server export layout\n"
                 "AF3_outputs/\n"
                 "  fold_binder_001/\n"
@@ -164,7 +122,7 @@ def launch_ipsae_eval_ui() -> None:
                 "    fold_binder_002_model_0.cif\n"
                 "    fold_binder_002_full_data_0.json"
             ),
-            _html(
+            html(
                 f'<span style="{SOFT}">AlphaFold Server ranks structures from 0 to 4, with model 0 as the highest-confidence prediction. '
                 f'<a href="{AF3_SERVER_OUTPUT_URL}" target="_blank">Official AlphaFold Server output reference</a>.</span>'
             ),
@@ -192,16 +150,16 @@ def launch_ipsae_eval_ui() -> None:
         extra_title: str | None = None,
         extra_table=None,
     ) -> None:
-        _publish_cell(
+        publish_cell(
             RESULT_MSG_ID,
             HTML(f'<div style="{style};margin:8px 0;font-family:sans-serif">{message}</div>'),
             cell_initialized,
         )
         if table is not None:
-            _publish_cell(RESULT_TABLE_ID, table, cell_initialized)
+            publish_cell(RESULT_TABLE_ID, table, cell_initialized)
         if extra_title is not None and extra_table is not None:
-            _publish_cell(RESULT_EXTRA_ID, HTML(f"<b>{extra_title}</b>"), cell_initialized)
-            _publish_cell(f"{RESULT_EXTRA_ID}-table", extra_table, cell_initialized)
+            publish_cell(RESULT_EXTRA_ID, HTML(f"<b>{extra_title}</b>"), cell_initialized)
+            publish_cell(f"{RESULT_EXTRA_ID}-table", extra_table, cell_initialized)
 
     def current_job() -> IpsaeJob:
         structure = structure_path.value.strip()
@@ -264,10 +222,10 @@ def launch_ipsae_eval_ui() -> None:
                 output_dir=eval_output_dir,
             )
             structure = resolve_repo_path(job.structure_file)
-            msg = f"SUCCESS: ipSAE completed. Outputs saved to {_rel(structure.parent)}"
+            msg = f"SUCCESS: ipSAE completed. Outputs saved to {rel_repo_path(structure.parent)}"
             if collect:
-                copied_dir = resolve_repo_path(eval_output_dir) / _safe_name(job.label)
-                msg += f"<br/>Copied outputs to {_rel(copied_dir)}"
+                copied_dir = resolve_repo_path(eval_output_dir) / safe_name(job.label)
+                msg += f"<br/>Copied outputs to {rel_repo_path(copied_dir)}"
             set_status(msg, OK)
             show_cell_result(msg, OK, table=scores)
         except Exception as exc:
@@ -341,9 +299,9 @@ def launch_ipsae_eval_ui() -> None:
                     len(errors),
                 )
                 msg = f"SUCCESS: bulk ipSAE finished for {ok_count}/{len(jobs)} model(s)."
-                msg += f"<br/>Logged AF3 folder/model selection to {_rel(log_path)}"
+                msg += f"<br/>Logged AF3 folder/model selection to {rel_repo_path(log_path)}"
                 if ok_count:
-                    msg += f"<br/>Copied ipSAE outputs to {_rel(bulk_out_dir)}"
+                    msg += f"<br/>Copied ipSAE outputs to {rel_repo_path(bulk_out_dir)}"
                     job = jobs[0]
                     pae_tag = str(int(job.pae_cutoff))
                     dist_tag = str(int(job.dist_cutoff))
@@ -392,9 +350,9 @@ def launch_ipsae_eval_ui() -> None:
     display(
         widgets.VBox(
             [
-                _banner("ipSAE Evaluation"),
-                _html(
-                    f'<span style="{SOFT}">Using original DunbrackLab script: {_rel(IPSAE_SCRIPT)}. '
+                banner("ipSAE Evaluation"),
+                html(
+                    f'<span style="{SOFT}">Using original DunbrackLab script: {rel_repo_path(IPSAE_SCRIPT)}. '
                     "BindCraft/FreeBindCraft ranked binder PDBs do not include PAE JSON files, so use AF3/Boltz/AF2 confidence outputs here and compare against final_design_stats.csv as needed.</span>"
                 ),
                 settings_panel,

@@ -9,58 +9,25 @@ Launch from notebooks/ipsae_eval.ipynb:
 
 from __future__ import annotations
 
-try:
-    import ipywidgets as widgets
-    from IPython.display import HTML, clear_output, display, update_display
-except ImportError:  # Allows import in non-notebook contexts for tests/parsing.
-    widgets = None
-    clear_output = None
-    display = print
-    update_display = None
-    HTML = None
-
 from ipsae_evals_summary import resolve_summary_csv_path, summarize_ipsae_folder
-from single_model_eval import _rel
-
-BANNER = (
-    "background:#e8d5f5;padding:12px 16px;border-radius:6px;"
-    "margin:8px 0;font-family:sans-serif;"
+from paths import rel_repo_path
+from ui_helpers import (
+    ERR,
+    INFO,
+    OK,
+    SOFT,
+    banner,
+    clear_output,
+    display,
+    html,
+    panel,
+    publish_cell,
+    widgets,
+    HTML,
 )
-SOFT = "color:#57606a;"
-OK = "color:#1a7f37;font-weight:600;"
-ERR = "color:#cf222e;font-weight:600;"
-INFO = "color:#0969da;"
 
 RESULT_MSG_ID = "ipsae-comparison-result-msg"
 RESULT_TABLE_ID = "ipsae-comparison-result-table"
-
-
-def _banner(text: str) -> "widgets.HTML":
-    return widgets.HTML(f'<div style="{BANNER}"><b>{text}</b></div>')
-
-
-def _html(text: str) -> "widgets.HTML":
-    return widgets.HTML(text)
-
-
-def _panel(children) -> "widgets.VBox":
-    return widgets.VBox(
-        children,
-        layout=widgets.Layout(
-            width="100%",
-            border="1px solid #d0d7de",
-            padding="12px 16px",
-            margin="0 0 8px 0",
-        ),
-    )
-
-
-def _publish_cell(display_id: str, obj, initialized: set[str]) -> None:
-    if display_id in initialized:
-        update_display(obj, display_id=display_id)
-    else:
-        display(obj, display_id=display_id)
-        initialized.add(display_id)
 
 
 def launch_ipsae_comparison_ui() -> None:
@@ -90,15 +57,15 @@ def launch_ipsae_comparison_ui() -> None:
         summary_status.value = f'<div style="{style}">{message}</div>'
 
     def show_summary_result(message: str, style: str = SOFT, table=None, section_title: str | None = None) -> None:
-        _publish_cell(
+        publish_cell(
             RESULT_MSG_ID,
             HTML(f'<div style="{style};margin:8px 0;font-family:sans-serif">{message}</div>'),
             cell_initialized,
         )
         if section_title is not None:
-            _publish_cell(RESULT_TABLE_ID, HTML(f"<b>{section_title}</b>"), cell_initialized)
+            publish_cell(RESULT_TABLE_ID, HTML(f"<b>{section_title}</b>"), cell_initialized)
         if table is not None:
-            _publish_cell(f"{RESULT_TABLE_ID}-data", table, cell_initialized)
+            publish_cell(f"{RESULT_TABLE_ID}-data", table, cell_initialized)
 
     def on_run_summary(_button) -> None:
         if state["running"]:
@@ -118,7 +85,7 @@ def launch_ipsae_comparison_ui() -> None:
             msg = (
                 f"SUCCESS: summarized {len(all_scores)} score file(s) from "
                 f"{summary['Model'].nunique() if 'Model' in summary else len(summary)} model(s). "
-                f"Saved to {_rel(out_path)}"
+                f"Saved to {rel_repo_path(out_path)}"
             )
             set_summary_status(msg, OK)
             show_summary_result(msg, OK, table=summary, section_title="models evaluation ranked by ipSAE score")
@@ -131,9 +98,9 @@ def launch_ipsae_comparison_ui() -> None:
 
     run_summary.on_click(on_run_summary)
 
-    comparison_panel = _panel(
+    comparison_panel = panel(
         [
-            _html(
+            html(
                 f'<span style="{SOFT}">Select a folder that already contains collected ipSAE metric outputs, such as '
                 "ipsae_evals or a bulk_ipsae_evals timestamp folder. This analysis is separate from running ipSAE.</span>"
             ),
@@ -146,7 +113,7 @@ def launch_ipsae_comparison_ui() -> None:
     display(
         widgets.VBox(
             [
-                _banner("ipSAE Comparison CSV"),
+                banner("ipSAE Comparison CSV"),
                 comparison_panel,
                 summary_status,
             ]

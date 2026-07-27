@@ -8,15 +8,9 @@ from pathlib import Path
 
 import pandas as pd
 
-from single_model_eval import (
-    DEFAULT_EVALS_DIR,
-    ROOT,
-    IpsaeJob,
-    _rel,
-    model_name_from_structure,
-    resolve_repo_path,
-    run_ipsae,
-)
+from naming import model_name_from_structure
+from paths import DEFAULT_EVALS_DIR, ROOT, rel_repo_path, resolve_repo_path
+from single_model_eval import IpsaeJob, run_ipsae
 
 
 def new_bulk_output_dir(base: str = "bulk_ipsae_evals") -> Path:
@@ -47,7 +41,7 @@ def write_bulk_run_log(
     af3_path = resolve_repo_path(af3_folder)
     log = {
         "created_at": datetime.now().isoformat(timespec="seconds"),
-        "af3_folder": _rel(af3_path),
+        "af3_folder": rel_repo_path(af3_path),
         "model_index": int(model_index),
         "model_count": len(jobs),
         "successful_models": int(ok_count),
@@ -55,8 +49,8 @@ def write_bulk_run_log(
         "models": [
             {
                 "model": job.label,
-                "structure_file": _rel(resolve_repo_path(job.structure_file)),
-                "pae_file": _rel(resolve_repo_path(job.pae_file)),
+                "structure_file": rel_repo_path(resolve_repo_path(job.structure_file)),
+                "pae_file": rel_repo_path(resolve_repo_path(job.pae_file)),
             }
             for job in jobs
         ],
@@ -90,7 +84,7 @@ def discover_af3_models(
         rows.append(
             {
                 "Model": model_name,
-                "Folder": _rel(structure.parent),
+                "Folder": rel_repo_path(structure.parent),
                 "Structure": structure.name,
                 "PAE": pae.name,
                 "Ready": found,
@@ -147,8 +141,8 @@ def run_bulk_ipsae(
             error_rows.append(
                 {
                     "Model": job.label,
-                    "Structure_File": _rel(resolve_repo_path(job.structure_file)),
-                    "PAE_File": _rel(resolve_repo_path(job.pae_file)),
+                    "Structure_File": rel_repo_path(resolve_repo_path(job.structure_file)),
+                    "PAE_File": rel_repo_path(resolve_repo_path(job.pae_file)),
                     "Error": str(exc),
                 }
             )
