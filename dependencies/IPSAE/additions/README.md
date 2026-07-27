@@ -23,6 +23,24 @@ FreeBindCraft-added files live here in `dependencies/IPSAE/additions/`:
 The UI calls the original upstream `../ipsae.py` script; it does not replace or
 modify the DunbrackLab implementation.
 
+## Single-model structure/PAE validation
+
+Single-model evaluation runs a preflight check in `single_model_eval.py` before
+calling `ipsae.py`. For AlphaFold 3 filenames, it requires:
+
+- structure: `*_model_N.cif`
+- PAE: `*_full_data_N.json`
+- the same complex prefix, model index, and parent folder
+
+Mismatches are rejected with a clear error, for example:
+
+- same complex, different model index (`model_0` with `full_data_1`)
+- different complexes (`fold_ifit5_l87_172_*` with `fold_ifit5_l68_*`)
+- matching names in different folders
+
+AF2 and Boltz pairing checks are not enforced yet; placeholders are left for
+future extension.
+
 ## Bulk evaluation input format
 
 The notebook Bulk Evaluation tab currently supports AlphaFold Server-style AF3
