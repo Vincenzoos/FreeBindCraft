@@ -1,0 +1,4 @@
+[submodule "dependencies/IPSAE"]
+	path = dependencies/IPSAE
+	url = https://github.com/Vincenzoos/IPSAE-notebook.git
+	branch = main
