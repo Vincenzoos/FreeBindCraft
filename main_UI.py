@@ -1,7 +1,8 @@
 """
 FreeBindCraft interactive UI (ipywidgets).
 
-Launch from FreeBindCraft_UI.ipynb:
+Launch from BindCraft_UI.ipynb (or the backwards-compatible
+FreeBindCraft_UI.ipynb):
 
     from main_UI import launch_all_ui
     launch_all_ui()
@@ -13,6 +14,7 @@ Cursor's notebook widget renderer may fail with ipywidgetsKernel errors.
 from __future__ import annotations
 
 import ast
+import csv
 import json
 import os
 import re
@@ -184,9 +186,34 @@ def _job_name_from_design_path(design_path) -> str:
 
 
 
+def _parse_gpu_query_output(output: str) -> List[Tuple[str, str]]:
+    """Parse nvidia-smi GPU CSV output into dropdown options.
+
+    nvidia-smi can return partial or ``N/A`` rows on systems where a GPU is
+    present but not fully queryable.  Keep valid rows and always retain the
+    Auto fallback so the UI remains usable.
+    """
+    options: List[Tuple[str, str]] = [("Auto (default visible GPUs)", "")]
+    for row in csv.reader((output or "").splitlines()):
+        if len(row) < 5:
+            continue
+        idx_raw, name, total_raw, used_raw, free_raw = [part.strip() for part in row[:5]]
+        try:
+            idx = str(int(idx_raw))
+            total = int(float(total_raw))
+            used = int(float(used_raw))
+            free = int(float(free_raw))
+        except (TypeError, ValueError):
+            continue
+        if total < 0 or used < 0 or free < 0:
+            continue
+        label = f"GPU {idx}: {name} — {free} MiB free / {total} MiB"
+        options.append((label, idx))
+    return options
+
+
 def _list_gpu_options() -> List[Tuple[str, str]]:
     """Return (label, CUDA_VISIBLE_DEVICES value) pairs from nvidia-smi."""
-    options: List[Tuple[str, str]] = [("Auto (default visible GPUs)", "")]
     try:
         proc = subprocess.run(
             [
@@ -199,17 +226,222 @@ def _list_gpu_options() -> List[Tuple[str, str]]:
             check=False,
         )
         if proc.returncode != 0:
-            return options
-        for line in proc.stdout.strip().splitlines():
-            parts = [p.strip() for p in line.split(",")]
-            if len(parts) < 5:
-                continue
-            idx_s, name, total, used, free = parts[:5]
-            label = f"GPU {idx_s}: {name} — {free} MiB free / {total} MiB ({used} used)"
-            options.append((label, idx_s))
+            return [("Auto (default visible GPUs)", "")]
+        return _parse_gpu_query_output(proc.stdout)
     except Exception:
-        pass
-    return options
+        return [("Auto (default visible GPUs)", "")]
+
+
+def _readonly_textarea(
+    value: str, description: str = "", height: str = "300px"
+) -> widgets.Textarea:
+    return widgets.Textarea(
+        value=value,
+        description=description,
+        disabled=True,
+        layout=widgets.Layout(width="100%", height=height),
+        style={"description_width": "0px"},
+    )
+
+
+def _nvidia_smi_output() -> widgets.Textarea:
+    """Return a read-only widget containing the complete nvidia-smi report."""
+    try:
+        proc = subprocess.run(
+            ["nvidia-smi"], capture_output=True, text=True, check=False
+        )
+    except FileNotFoundError:
+        return _readonly_textarea(
+            "nvidia-smi is unavailable (not installed or not on PATH).\n"
+            "GPU details cannot be displayed.",
+            height="360px",
+        )
+    except Exception as exc:
+        return _readonly_textarea(
+            f"Unable to run nvidia-smi: {exc}", height="360px"
+        )
+
+    report = "\n".join(
+        part for part in (proc.stdout or "", proc.stderr or "") if part
+    ).strip()
+    if proc.returncode != 0:
+        message = f"nvidia-smi returned exit code {proc.returncode}."
+        report = f"{message}\n{report}" if report else message
+    elif not report:
+        report = "nvidia-smi returned no output."
+    return _readonly_textarea(report, height="360px")
+
+
+def _parse_process_memory_output(output: str) -> List[Tuple[int, str]]:
+    """Parse ``pid, used_gpu_memory`` rows from nvidia-smi."""
+    rows: List[Tuple[int, str]] = []
+    for row in csv.reader((output or "").splitlines()):
+        if len(row) < 2:
+            continue
+        try:
+            pid = int(row[0].strip())
+        except (TypeError, ValueError):
+            continue
+        memory = row[1].strip()
+        if memory.lower() in {"n/a", "na", "unknown"}:
+            continue
+        rows.append((pid, memory))
+    return rows
+
+
+def _bindcraft_gpu_processes_output() -> widgets.Textarea:
+    """Return a read-only table of active bindcraft.py GPU processes."""
+    try:
+        gpu_proc = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=index",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        return _readonly_textarea(
+            "nvidia-smi is unavailable; active BindCraft GPU jobs cannot be listed.",
+            height="130px",
+        )
+    except Exception as exc:
+        return _readonly_textarea(
+            f"Unable to query visible GPUs: {exc}", height="130px"
+        )
+
+    if gpu_proc.returncode != 0:
+        detail = (gpu_proc.stderr or gpu_proc.stdout or "").strip()
+        message = "nvidia-smi could not list visible GPUs; active BindCraft GPU jobs cannot be listed."
+        if detail:
+            message += f"\n{detail}"
+        return _readonly_textarea(message, height="130px")
+
+    gpu_indices = []
+    for line in (gpu_proc.stdout or "").splitlines():
+        try:
+            gpu_indices.append(str(int(line.strip())))
+        except (TypeError, ValueError):
+            continue
+
+    rows: List[Tuple[str, str, str, str, str, str]] = []
+    for gpu_index in gpu_indices:
+        try:
+            apps_proc = subprocess.run(
+                [
+                    "nvidia-smi",
+                    "-i",
+                    gpu_index,
+                    "--query-compute-apps=pid,used_gpu_memory",
+                    "--format=csv,noheader,nounits",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except FileNotFoundError:
+            return _readonly_textarea(
+                "nvidia-smi is unavailable; active BindCraft GPU jobs cannot be listed.",
+                height="130px",
+            )
+        except Exception as exc:
+            return _readonly_textarea(
+                f"Unable to query GPU {gpu_index}: {exc}", height="130px"
+            )
+        if apps_proc.returncode != 0:
+            detail = (apps_proc.stderr or apps_proc.stdout or "").strip()
+            message = f"Unable to query compute applications on GPU {gpu_index}."
+            if detail:
+                message += f"\n{detail}"
+            return _readonly_textarea(message, height="130px")
+
+        for pid, memory in _parse_process_memory_output(apps_proc.stdout):
+            try:
+                ps_proc = subprocess.run(
+                    ["ps", "-p", str(pid), "-o", "user=,comm=,args="],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+            except FileNotFoundError:
+                return _readonly_textarea(
+                    "ps is unavailable; process details cannot be resolved.",
+                    height="130px",
+                )
+            except Exception as exc:
+                return _readonly_textarea(
+                    f"Unable to read process {pid}: {exc}", height="130px"
+                )
+            if ps_proc.returncode != 0 or not (ps_proc.stdout or "").strip():
+                detail = (ps_proc.stderr or "").strip()
+                message = f"Process metadata for PID {pid} could not be read."
+                if detail:
+                    message += f"\n{detail}"
+                return _readonly_textarea(message, height="130px")
+
+            ps_fields = ps_proc.stdout.strip().split(None, 2)
+            if len(ps_fields) < 3:
+                return _readonly_textarea(
+                    f"Process metadata for PID {pid} is incomplete.",
+                    height="130px",
+                )
+            user, process_name, command_line = ps_fields
+            if "bindcraft.py" not in command_line:
+                continue
+            try:
+                working_directory = os.readlink(f"/proc/{pid}/cwd")
+            except Exception as exc:
+                return _readonly_textarea(
+                    f"Working directory for PID {pid} could not be read: {exc}",
+                    height="130px",
+                )
+            rows.append(
+                (
+                    gpu_index,
+                    str(pid),
+                    user,
+                    process_name,
+                    working_directory,
+                    memory if "mib" in memory.lower() else f"{memory} MiB",
+                )
+            )
+
+    if not rows:
+        return _readonly_textarea(
+            "No active BindCraft jobs are currently using GPU memory.",
+            height="130px",
+        )
+
+    # Use fixed-width columns so long command lines cannot make the table
+    # wrap.  The command line is still resolved above for filtering, while
+    # the compact executable name is what belongs in this summary table.
+    column_widths = (8, 12, 16, 24, 48)
+    header = (
+        f"{'GPU':<{column_widths[0]}}"
+        f"{'PID':<{column_widths[1]}}"
+        f"{'USER':<{column_widths[2]}}"
+        f"{'PROCESS':<{column_widths[3]}}"
+        f"{'CWD':<{column_widths[4]}}"
+        "GPU MEMORY"
+    ).rstrip()
+    separator = "-" * len(header)
+
+    formatted_rows = []
+    for gpu, pid, user, process, cwd, memory in rows:
+        values = [gpu, pid, user, process, cwd, memory]
+        cells = []
+        for value, width in zip(values, column_widths):
+            value = str(value)
+            if len(value) > width:
+                value = value[: max(0, width - 3)] + "..."
+            cells.append(f"{value:<{width}}")
+        cells.append(str(memory))
+        formatted_rows.append("".join(cells).rstrip())
+
+    lines = [header, separator, *formatted_rows]
+    return _readonly_textarea("\n".join(lines), height="130px")
 
 def _load_target_progress_meta(target_json_name: str) -> tuple[Path, int]:
     """Return (design_path, number_of_final_designs) from a settings_target JSON."""
@@ -753,17 +985,81 @@ def launch_all_ui() -> None:
         layout=widgets.Layout(width="180px"),
     )
     gpu_status = widgets.HTML(
-        "<span style='color:#555;'>Sets <code>CUDA_VISIBLE_DEVICES</code> for the FreeBindCraft job.</span>"
+        "<span style='color:#555;'>Sets <code>CUDA_VISIBLE_DEVICES</code> for the FreeBindCraft job. "
+        "Memory values are point-in-time snapshots; use Refresh GPU list to update them.</span>"
     )
 
-    def refresh_gpu_dropdown(_=None):
-        opts = _list_gpu_options()
-        cur = gpu_dropdown.value
-        gpu_dropdown.options = opts
-        values = [v for _, v in opts]
-        gpu_dropdown.value = cur if cur in values else (opts[0][1] if opts else "")
+    gpu_refreshing = {"active": False}
 
-    refresh_gpu_btn.on_click(refresh_gpu_dropdown)
+    def refresh_gpu_dropdown(_=None):
+        if gpu_refreshing["active"]:
+            return
+        gpu_refreshing["active"] = True
+        try:
+            opts = _list_gpu_options()
+            cur = gpu_dropdown.value
+            gpu_dropdown.options = opts
+            values = [v for _, v in opts]
+            gpu_dropdown.value = cur if cur in values else (opts[0][1] if opts else "")
+        finally:
+            gpu_refreshing["active"] = False
+
+    track_gpu_memory_w = widgets.Checkbox(
+        value=False,
+        description="Track GPU memory usage",
+        indent=False,
+    )
+    tracking_help = widgets.HTML(
+        "<p style='color:#555;margin-top:0;'>When enabled, FreeBindCraft appends per-stage "
+        "memory measurements to <code>gpu_memory_stats.csv</code> in the design folder. "
+        "Tracking is off by default.</p>"
+    )
+
+    nvidia_smi_panel = _nvidia_smi_output()
+    bindcraft_gpu_processes_panel = _bindcraft_gpu_processes_output()
+    nvidia_smi_heading = widgets.HTML(
+        "<b>nvidia-smi details for the current selection</b>"
+    )
+    nvidia_smi_help = widgets.HTML(
+        "<p><b>How to read nvidia-smi:</b> The report lists every GPU visible on this machine. "
+        "<b>Memory-Usage</b> is current VRAM use / capacity; <b>GPU-Util</b> shows how busy the "
+        "GPU is: 0% means it is mostly idle, while 100% means it is very busy. This is separate "
+        "from memory usage. <b>Pwr-Usage/Cap</b> is current power draw / power limit, and "
+        "<b>Perf</b> is the performance state (P0 is high performance). The "
+        "<b>Processes</b> section shows programs currently using GPU memory.</p>"
+    )
+    bindcraft_gpu_processes_heading = widgets.HTML(
+        "<b>Active FreeBindCraft jobs using GPU memory</b>"
+    )
+    bindcraft_gpu_processes_help = widgets.HTML(
+        "<p><b>Active FreeBindCraft jobs:</b> This table shows only FreeBindCraft processes currently "
+        "using GPU memory. <b>GPU</b> is the GPU number, <b>PID</b> identifies the running "
+        "process, <b>User</b> is the account running it, <b>Process</b> is the program name, "
+        "<b>CWD</b> shows the project folder it is running from, and <b>GPU Memory</b> "
+        "shows how much memory that job is using. If the table is empty, no FreeBindCraft job is "
+        "currently using a GPU.</p>"
+    )
+
+    def refresh_monitoring_panels(_=None):
+        """Refresh both read-only GPU monitoring reports."""
+        nvidia_smi_panel.value = _nvidia_smi_output().value
+        bindcraft_gpu_processes_panel.value = _bindcraft_gpu_processes_output().value
+
+    def on_gpu_selection_change(change):
+        if change.get("name") != "value" or change.get("new") == change.get("old"):
+            return
+        # GPU labels contain a point-in-time memory snapshot.  Re-query on a
+        # selection change so the selected GPU and monitoring reports are fresh.
+        refresh_gpu_dropdown()
+        refresh_monitoring_panels()
+
+    gpu_dropdown.observe(on_gpu_selection_change, names="value")
+
+    def on_refresh_gpu(_):
+        refresh_gpu_dropdown()
+        refresh_monitoring_panels()
+
+    refresh_gpu_btn.on_click(on_refresh_gpu)
 
     no_pyrosetta_w = widgets.Checkbox(value=True, description="--no-pyrosetta (OpenMM bypass)")
     rank_by_w = widgets.Dropdown(
@@ -826,6 +1122,8 @@ def launch_all_ui() -> None:
             cmd.append("--no-plots")
         if no_anims_w.value:
             cmd.append("--no-animations")
+        if track_gpu_memory_w.value:
+            cmd.append("--gpu-memory-tracking")
         return cmd
 
     def on_generate(_):
@@ -840,6 +1138,10 @@ def launch_all_ui() -> None:
                     print(f"CUDA_VISIBLE_DEVICES={gpu}")
                 else:
                     print("CUDA_VISIBLE_DEVICES=(unset — use default visible GPUs)")
+                print(
+                    "GPU memory tracking: "
+                    + ("enabled" if track_gpu_memory_w.value else "disabled")
+                )
                 print(" \\\n  ".join(cmd))
                 print("\nReady. Press Run FreeBindCraft to start.")
         except Exception as e:
@@ -1151,7 +1453,9 @@ def launch_all_ui() -> None:
                     "tmux not found. Install tmux so jobs can survive notebook kernel death."
                 )
 
-            cmd = state.get("run_script") or build_command()
+            # Rebuild from the current widgets so GPU and tracking changes made
+            # after preview generation are reflected in the run script.
+            cmd = build_command()
             state["run_script"] = cmd
             design_path, n_final = _load_target_progress_meta(state["target_json"])
             job_name = _job_name_from_design_path(design_path)
@@ -1405,6 +1709,14 @@ def launch_all_ui() -> None:
             gpu_dropdown,
             widgets.HBox([refresh_gpu_btn]),
             gpu_status,
+            track_gpu_memory_w,
+            tracking_help,
+            nvidia_smi_heading,
+            nvidia_smi_help,
+            nvidia_smi_panel,
+            bindcraft_gpu_processes_heading,
+            bindcraft_gpu_processes_help,
+            bindcraft_gpu_processes_panel,
             no_pyrosetta_w,
             rank_by_w,
             widgets.HBox([verbose_w, no_plots_w, no_anims_w]),
@@ -1430,4 +1742,4 @@ def launch_all_ui() -> None:
 
 
 if __name__ == "__main__":
-    print("Open FreeBindCraft_UI.ipynb in JupyterLab and run launch_all_ui().")
+    print("Open BindCraft_UI.ipynb in JupyterLab and run launch_all_ui().")
