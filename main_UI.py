@@ -22,6 +22,7 @@ import signal
 import subprocess
 import threading
 import time
+import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -71,6 +72,42 @@ def _list_pdb_options(folder: Path) -> List[Tuple[str, str]]:
         key=lambda p: p.name.lower(),
     )
     return [(p.name, str(p.resolve())) for p in files]
+
+
+def _list_output_zip_options() -> List[Tuple[str, str]]:
+    """Return (label, value) pairs for zipping outputs/ or one design subfolder."""
+    options: List[Tuple[str, str]] = [("Entire outputs/ folder", "__all__")]
+    if OUTPUTS_DIR.is_dir():
+        for p in sorted(OUTPUTS_DIR.iterdir(), key=lambda x: x.name.lower()):
+            if p.is_dir() and not p.name.startswith("."):
+                options.append((p.name, p.name))
+    return options
+
+
+def _zip_outputs(selection: str, zip_name: str = "outputs.zip") -> Path:
+    """Zip OUTPUTS_DIR (or one subfolder) into BINDCRAFT_ROOT / basename(zip_name)."""
+    name = (zip_name or "outputs.zip").strip() or "outputs.zip"
+    if not name.lower().endswith(".zip"):
+        name = f"{name}.zip"
+    dest = BINDCRAFT_ROOT / Path(name).name
+
+    if selection == "__all__":
+        source = OUTPUTS_DIR
+        arc_root = Path("outputs")
+    else:
+        source = OUTPUTS_DIR / selection
+        if not source.is_dir():
+            raise FileNotFoundError(f"Output folder not found: {source}")
+        arc_root = Path(selection)
+
+    with zipfile.ZipFile(dest, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        if source.is_dir():
+            for path in source.rglob("*"):
+                if path.is_dir():
+                    continue
+                rel = path.relative_to(source)
+                zf.write(path, arcname=str(arc_root / rel))
+    return dest
 
 
 def _banner(text: str) -> widgets.HTML:
@@ -641,14 +678,14 @@ def launch_all_ui() -> None:
     welcome = widgets.HTML(
         f"""
         <div style="{BANNER}">
-          <h2 style="margin:0 0 8px 0;">Welcome to the FreeBindCraft User Interface</h2>
-          <ol style="margin:0;padding-left:20px;">
-            <li>Upload a target PDB file.</li>
-            <li>Upload or create a settings target JSON file (must contain the PDB path).</li>
-            <li>Select settings target JSON, filters, and advanced settings files.</li>
-            <li>Job name is automatic from <code>design_path</code> folder name.</li>
-            <li>Generate the run script, then Run FreeBindCraft.</li>
-          </ol>
+          <h2 style="margin:0 0 8px 0;">FreeBindCraft Workflow</h2>
+          <ul style="margin:0;padding-left:1em;list-style:none;">
+            <li style="margin:2px 0;"><b>Step 1:</b> Upload a target PDB file.</li>
+            <li style="margin:2px 0;"><b>Step 2:</b> Upload or create a settings target JSON file.</li>
+            <li style="margin:2px 0;"><b>Steps 3–6:</b> Select settings target JSON, filters, and advanced
+                settings; generate the run script, then Run BindCraft.</li>
+            <li style="margin:2px 0;"><b>Step 7:</b> Zip outputs for download.</li>
+          </ul>
         </div>
         """
     )
@@ -1675,6 +1712,69 @@ def launch_all_ui() -> None:
     refresh_jobs_dropdown()
     threading.Thread(target=progress_poll_loop, daemon=True).start()
 
+    # --- Step 7: Zip outputs ---
+    zip_banner = _banner("Step 7: Zip outputs for download")
+    zip_help = widgets.HTML(
+        "<p>Choose the entire <code>outputs/</code> folder or one design subfolder, "
+        "then create a zip archive in the project root for download.</p>"
+    )
+    zip_dropdown = widgets.Dropdown(
+        options=_list_output_zip_options(),
+        value="__all__",
+        description="Source:",
+        layout=widgets.Layout(width="70%"),
+        style={"description_width": "80px"},
+    )
+    zip_name_w = widgets.Text(
+        value="outputs.zip",
+        description="Zip name:",
+        layout=widgets.Layout(width="70%"),
+        style={"description_width": "80px"},
+    )
+    refresh_zip_btn = widgets.Button(
+        description="Refresh folders",
+        icon="refresh",
+        button_style="info",
+        layout=widgets.Layout(width="200px"),
+    )
+    zip_btn = widgets.Button(
+        description="Create zip",
+        button_style="success",
+        layout=widgets.Layout(width="200px", height="40px"),
+    )
+    zip_status = widgets.HTML("")
+
+    def on_refresh_zip(_=None):
+        prev = zip_dropdown.value
+        opts = _list_output_zip_options()
+        zip_dropdown.options = opts
+        values = [v for _, v in opts]
+        if prev in values:
+            zip_dropdown.value = prev
+        else:
+            zip_dropdown.value = "__all__"
+
+    def on_zip_source_change(change=None):
+        val = zip_dropdown.value
+        if val == "__all__":
+            zip_name_w.value = "outputs.zip"
+        elif val:
+            zip_name_w.value = f"{val}.zip"
+
+    def on_create_zip(_=None):
+        try:
+            dest = _zip_outputs(zip_dropdown.value, zip_name_w.value)
+            size_mb = dest.stat().st_size / (1024 * 1024)
+            zip_status.value = (
+                f"<span style='{OK}'>Created {dest} ({size_mb:.2f} MB)</span>"
+            )
+        except Exception as e:
+            zip_status.value = f"<span style='{ERR}'>Zip failed: {e}</span>"
+
+    refresh_zip_btn.on_click(on_refresh_zip)
+    zip_btn.on_click(on_create_zip)
+    zip_dropdown.observe(on_zip_source_change, names="value")
+
     ui = widgets.VBox(
         [
             welcome,
@@ -1735,6 +1835,13 @@ def launch_all_ui() -> None:
             abort_btn,
             refresh_jobs_btn,
             abort_status,
+            zip_banner,
+            zip_help,
+            zip_dropdown,
+            zip_name_w,
+            widgets.HBox([refresh_zip_btn]),
+            zip_btn,
+            zip_status,
         ],
         layout=widgets.Layout(width="100%", padding="8px"),
     )
