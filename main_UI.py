@@ -136,6 +136,7 @@ _NAME_MAX_LEN = 150
 _DESIGN_PATH_MAX_LEN = 512
 _CHAINS_MAX_LEN = 64
 _HOTSPOTS_MAX_LEN = 500
+_LENGTH_MAX = 300
 _FILE_STEM_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
 _SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 _CHAINS_RE = re.compile(r"^[A-Za-z0-9](,[A-Za-z0-9])*$")
@@ -305,11 +306,15 @@ def _validate_lengths_field(raw: str, require: bool = True) -> Optional[str]:
     if not s:
         return "lengths is required" if require else None
     try:
-        a, b = _parse_lengths(s)
+        lo, hi = _parse_lengths(s)
     except Exception:
-        return "lengths: two positive integers (e.g. [65, 150] or 65,150)"
-    if a < 1 or b < 1:
-        return "lengths must be positive integers (≥ 1)"
+        return "Enter two numbers for min and max binder size (e.g. [65, 150])"
+    if lo < 1 or hi < 1:
+        return "Binder size must be at least 1"
+    if lo >= hi:
+        return "Min length must be less than max length (e.g. [65, 150], not [150, 65])"
+    if hi > _LENGTH_MAX:
+        return f"Max binder length cannot exceed {_LENGTH_MAX}"
     return None
 
 
@@ -962,8 +967,9 @@ def launch_all_ui() -> None:
             <li><b>hotspots</b> — Optional. Leave blank to let the model choose a site,
               or specify residues such as <code>A56</code>, <code>A60-65</code>, or a whole chain
               <code>A</code>.</li>
-            <li><b>lengths</b> — Binder size range as two numbers
-              (e.g. <code>[65, 150]</code> = min 65, max 150 residues).</li>
+            <li><b>lengths</b> — Binder size range as min then max
+              (e.g. <code>[65, 150]</code>). Min must be less than max;
+              max cannot exceed {_LENGTH_MAX}.</li>
             <li><b>num designs</b> — How many accepted designs to generate (1–100).</li>
           </ul>
           <span style="color:#57606a;">Problems are highlighted in red.
@@ -1086,7 +1092,7 @@ def launch_all_ui() -> None:
         description="lengths:",
         layout=_field_layout(),
         style=style,
-        placeholder="e.g. [65, 150] (min, max binder size)",
+        placeholder=f"e.g. [65, 150] (min < max, max ≤ {_LENGTH_MAX})",
     )
     n_designs_w = widgets.BoundedIntText(
         value=100,
