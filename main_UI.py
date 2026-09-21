@@ -1500,7 +1500,7 @@ def launch_all_ui() -> None:
         "<code>settings_advanced</code> file, then generate the run script.</p>"
     )
     generate_btn = widgets.Button(
-        description="Generate BindCraft Run Script with Settings",
+        description="Generate FreeBindCraft Run Script with Settings",
         button_style="success",
         layout=widgets.Layout(width="70%", height="42px"),
     )
