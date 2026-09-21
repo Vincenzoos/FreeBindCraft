@@ -527,8 +527,30 @@ def _parse_process_memory_output(output: str) -> List[Tuple[int, str]]:
     return rows
 
 
+def _is_this_repo_bindcraft_process(
+    command_line: str, working_directory: Optional[str] = None
+) -> bool:
+    """True when a bindcraft.py process belongs to this FreeBindCraft install.
+
+    Sibling BindCraft checkouts also run ``bindcraft.py``, so matching the
+    script name alone is not enough. Prefer an absolute path to this repo's
+    script in argv; otherwise require the process CWD to be under this root.
+    """
+    root = BINDCRAFT_ROOT.resolve()
+    script = str(BINDCRAFT_SCRIPT.resolve())
+    if script in (command_line or ""):
+        return True
+    if not working_directory:
+        return False
+    try:
+        Path(working_directory).resolve().relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
 def _bindcraft_gpu_processes_output() -> widgets.Textarea:
-    """Return a read-only table of active bindcraft.py GPU processes."""
+    """Return a read-only table of active FreeBindCraft GPU processes."""
     try:
         gpu_proc = subprocess.run(
             [
@@ -635,6 +657,8 @@ def _bindcraft_gpu_processes_output() -> widgets.Textarea:
                     f"Working directory for PID {pid} could not be read: {exc}",
                     height="130px",
                 )
+            if not _is_this_repo_bindcraft_process(command_line, working_directory):
+                continue
             rows.append(
                 (
                     gpu_index,
@@ -648,7 +672,7 @@ def _bindcraft_gpu_processes_output() -> widgets.Textarea:
 
     if not rows:
         return _readonly_textarea(
-            "No active BindCraft jobs are currently using GPU memory.",
+            "No active FreeBindCraft jobs are currently using GPU memory.",
             height="130px",
         )
 
@@ -770,7 +794,7 @@ def _discover_running_jobs() -> Dict[str, Dict[str, Any]]:
     except Exception:
         pass
 
-    # 2) live bindcraft.py processes (covers non-tmux legacy runs)
+    # 2) live bindcraft.py processes from this repo (covers non-tmux legacy runs)
     try:
         proc = subprocess.run(["pgrep", "-af", "python.*bindcraft.py"], capture_output=True, text=True)
         if proc.returncode == 0:
@@ -783,6 +807,12 @@ def _discover_running_jobs() -> Dict[str, Dict[str, Any]]:
                     continue
                 pid = int(parts[0])
                 cmd = parts[1]
+                try:
+                    cwd = os.readlink(f"/proc/{pid}/cwd")
+                except Exception:
+                    cwd = None
+                if not _is_this_repo_bindcraft_process(cmd, cwd):
+                    continue
                 settings_path = _extract_settings_path_from_cmd(cmd)
                 if settings_path is None:
                     continue
@@ -1420,15 +1450,45 @@ def launch_all_ui() -> None:
     refresh_gpu_btn.on_click(on_refresh_gpu)
 
     no_pyrosetta_w = widgets.Checkbox(value=True, description="--no-pyrosetta (OpenMM bypass)")
+    no_pyrosetta_help = widgets.HTML(
+        "<p style='color:#555;margin-top:0;'>"
+        "Skip PyRosetta and use the open-source "
+        "<a href='https://openmm.org/' target='_blank' rel='noopener noreferrer'>OpenMM</a> "
+        "path instead — recommended for license-free work. "
+        "PyRosetta requires a commercial license for non-academic use "
+        "(see "
+        "<a href='https://www.pyrosetta.org/home/licensing-pyrosetta' target='_blank' "
+        "rel='noopener noreferrer'>PyRosetta licensing</a> and the "
+        "<a href='https://rosettacommons.org/software/licensing-faq/' target='_blank' "
+        "rel='noopener noreferrer'>Rosetta Commons licensing FAQ</a>). "
+        "If PyRosetta needed, uncheck this option or use "
+        "<a href='https://github.com/martinpacesa/BindCraft' target='_blank' "
+        "rel='noopener noreferrer'>BindCraft</a> instead. "
+        "More details: "
+        "<a href='https://github.com/cytokineking/FreeBindCraft"
+        "#key-modification-pyrosetta-bypass-functionality' target='_blank' "
+        "rel='noopener noreferrer'>FreeBindCraft PyRosetta bypass</a>.</p>"
+    )
     rank_by_w = widgets.Dropdown(
         options=["i_pTM", "ipSAE"],
         value="i_pTM",
         description="Rank by:",
         style={"description_width": "120px"},
     )
+    rank_by_help = widgets.HTML(
+        "<p style='color:#555;margin-top:0;'>Metric used to rank accepted final designs. "
+        "<code>i_pTM</code> is the default; <code>ipSAE</code> ranks by interface predicted "
+        "Structural Alignment Error.</p>"
+    )
     verbose_w = widgets.Checkbox(value=False, description="Verbose")
     no_plots_w = widgets.Checkbox(value=False, description="Disable plots")
     no_anims_w = widgets.Checkbox(value=False, description="Disable animations")
+    run_flags_help = widgets.HTML(
+        "<p style='color:#555;margin-top:0;'>"
+        "<b>Verbose:</b> more detailed progress/timing logs. "
+        "<b>Disable plots / animations:</b> skip saving trajectory plots and animations "
+        "(faster, less disk use).</p>"
+    )
 
     select_help = widgets.HTML(
         "<p>Select a <code>settings_filters</code> file and a "
@@ -2141,8 +2201,11 @@ def launch_all_ui() -> None:
             bindcraft_gpu_processes_help,
             bindcraft_gpu_processes_panel,
             no_pyrosetta_w,
+            no_pyrosetta_help,
             rank_by_w,
+            rank_by_help,
             widgets.HBox([verbose_w, no_plots_w, no_anims_w]),
+            run_flags_help,
             select_help,
             filters_dropdown,
             advanced_dropdown,
