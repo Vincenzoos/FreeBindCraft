@@ -9,7 +9,6 @@ BindCraft-main-v1.5.code-workspace
 **/FASPR-master/
 *.cc
 **/ColabDesign-main/
-ipSAE.py
 params
 outputs/
 outputs.zip
