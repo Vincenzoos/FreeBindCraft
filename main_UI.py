@@ -921,6 +921,31 @@ def launch_all_ui() -> None:
         """
     )
 
+    licensing_banner = _banner("Licensing")
+    no_pyrosetta_w = widgets.Checkbox(
+        value=True, description="--no-pyrosetta", indent=False
+    )
+    licensing_help = widgets.HTML(
+        "<p style='color:#555;margin-top:0;'>"
+        "FreeBindCraft is MIT-licensed "
+        "(<a href='https://github.com/cytokineking/FreeBindCraft' target='_blank' "
+        "rel='noopener noreferrer'>FreeBindCraft</a>). "
+        "Keep <code>--no-pyrosetta</code> checked for license-free work. "
+        "PyRosetta is free for academic and non-profit use but requires a commercial "
+        "license for non-academic use (see "
+        "<a href='https://www.pyrosetta.org/home/licensing-pyrosetta' target='_blank' "
+        "rel='noopener noreferrer'>PyRosetta licensing</a> and the "
+        "<a href='https://rosettacommons.org/software/licensing-faq/' target='_blank' "
+        "rel='noopener noreferrer'>Rosetta Commons licensing FAQ</a>). "
+        "If PyRosetta is needed, uncheck this option or use "
+        "<a href='https://github.com/martinpacesa/BindCraft' target='_blank' "
+        "rel='noopener noreferrer'>BindCraft</a>. "
+        "For how PyRosetta steps are replaced with license-free alternatives, see the "
+        "<a href='https://github.com/cytokineking/FreeBindCraft/blob/master/"
+        "technical_overview/FreeBindCraft_Technical_Overview.md' target='_blank' "
+        "rel='noopener noreferrer'>technical overview</a>.</p>"
+    )
+
     # --- Uploads ---
     upload_intro = widgets.HTML("<p>Next, you can upload a PDB or a target JSON file:</p>")
     pdb_banner = _banner(f"Step 1: If not already present, upload a PDB file to {INPUTS_DIR}/")
@@ -1449,26 +1474,6 @@ def launch_all_ui() -> None:
 
     refresh_gpu_btn.on_click(on_refresh_gpu)
 
-    no_pyrosetta_w = widgets.Checkbox(value=True, description="--no-pyrosetta (OpenMM bypass)")
-    no_pyrosetta_help = widgets.HTML(
-        "<p style='color:#555;margin-top:0;'>"
-        "Skip PyRosetta and use the open-source "
-        "<a href='https://openmm.org/' target='_blank' rel='noopener noreferrer'>OpenMM</a> "
-        "path instead — recommended for license-free work. "
-        "PyRosetta requires a commercial license for non-academic use "
-        "(see "
-        "<a href='https://www.pyrosetta.org/home/licensing-pyrosetta' target='_blank' "
-        "rel='noopener noreferrer'>PyRosetta licensing</a> and the "
-        "<a href='https://rosettacommons.org/software/licensing-faq/' target='_blank' "
-        "rel='noopener noreferrer'>Rosetta Commons licensing FAQ</a>). "
-        "If PyRosetta needed, uncheck this option or use "
-        "<a href='https://github.com/martinpacesa/BindCraft' target='_blank' "
-        "rel='noopener noreferrer'>BindCraft</a> instead. "
-        "More details: "
-        "<a href='https://github.com/cytokineking/FreeBindCraft"
-        "#key-modification-pyrosetta-bypass-functionality' target='_blank' "
-        "rel='noopener noreferrer'>FreeBindCraft PyRosetta bypass</a>.</p>"
-    )
     rank_by_w = widgets.Dropdown(
         options=["i_pTM", "ipSAE"],
         value="i_pTM",
@@ -2159,6 +2164,9 @@ def launch_all_ui() -> None:
     ui = widgets.VBox(
         [
             welcome,
+            licensing_banner,
+            no_pyrosetta_w,
+            licensing_help,
             upload_intro,
             pdb_banner,
             pdb_upload,
@@ -2200,8 +2208,6 @@ def launch_all_ui() -> None:
             bindcraft_gpu_processes_heading,
             bindcraft_gpu_processes_help,
             bindcraft_gpu_processes_panel,
-            no_pyrosetta_w,
-            no_pyrosetta_help,
             rank_by_w,
             rank_by_help,
             widgets.HBox([verbose_w, no_plots_w, no_anims_w]),
