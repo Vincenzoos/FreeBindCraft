@@ -363,6 +363,193 @@ class GpuMemoryTracker:
             self._write_row(self._samples)
         return False
 
+
+# CPU tracking intentionally retains the historical ``bindcraft_`` CSV
+# prefix so statistics from the BindCraft and FreeBindCraft variants share a
+# compatible schema.  The prefix is a column-format convention only; process
+# ownership is handled by the UI's repository-aware predicate.
+CPU_MEMORY_STATS_COLUMNS = [
+    'design_name',
+    'stage',
+    'bindcraft_rss_before_mib',
+    'bindcraft_rss_peak_mib',
+    'bindcraft_rss_after_mib',
+    'system_memory_total_mib',
+    'bindcraft_rss_peak_percent',
+    'status',
+    'error',
+]
+
+_CPU_MEMORY_CSV_LOCK = threading.Lock()
+
+
+def _read_proc_rss_mib(pid=None):
+    """Read ``VmRSS`` for a process from procfs, returning MiB or ``None``."""
+    pid = os.getpid() if pid is None else int(pid)
+    try:
+        with open(f'/proc/{pid}/status', 'r', encoding='utf-8') as handle:
+            for line in handle:
+                if line.startswith('VmRSS:'):
+                    match = re.search(r'\d+', line)
+                    if match:
+                        return float(match.group(0)) / 1024.0
+    except (OSError, ValueError):
+        return None
+    return None
+
+
+def _read_system_memory_total_mib():
+    """Read ``MemTotal`` from procfs, returning MiB or ``None``."""
+    try:
+        with open('/proc/meminfo', 'r', encoding='utf-8') as handle:
+            for line in handle:
+                if line.startswith('MemTotal:'):
+                    match = re.search(r'\d+', line)
+                    if match:
+                        return float(match.group(0)) / 1024.0
+    except (OSError, ValueError):
+        return None
+    return None
+
+
+def _sample_cpu_memory(pid=None):
+    return {
+        'rss': _read_proc_rss_mib(pid),
+        'system_total': _read_system_memory_total_mib(),
+    }
+
+
+def create_cpu_memory_csv(csv_path):
+    """Create the CPU tracking header without replacing an existing file."""
+    if not csv_path:
+        return
+    csv_path = os.fspath(csv_path)
+    parent = os.path.dirname(os.path.abspath(csv_path))
+    os.makedirs(parent, exist_ok=True)
+    with _CPU_MEMORY_CSV_LOCK:
+        if os.path.exists(csv_path) and os.path.getsize(csv_path) > 0:
+            return
+        with open(csv_path, 'a', newline='') as handle:
+            csv.DictWriter(handle, fieldnames=CPU_MEMORY_STATS_COLUMNS).writeheader()
+
+
+class CpuMemoryTracker:
+    """Sample this process' RSS during one pipeline stage."""
+
+    def __init__(
+        self,
+        csv_path=None,
+        design_name=None,
+        stage=None,
+        interval=0.2,
+        *,
+        design=None,
+        pipeline_stage=None,
+    ):
+        if design_name is None:
+            design_name = design
+        if stage is None:
+            stage = pipeline_stage
+        self.csv_path = csv_path
+        self.design_name = str(design_name or '')
+        self.stage = str(stage or '')
+        self.interval = max(0.05, float(interval))
+        self.pid = os.getpid()
+        self.status = 'success'
+        self.error = ''
+        self._samples = []
+        self._stop_event = threading.Event()
+        self._thread = None
+
+    def set_status(self, status, error=''):
+        """Set a non-exception outcome such as ``filter_failed``."""
+        self.status = str(status)
+        self.error = str(error or '')
+
+    def _sample_loop(self):
+        while not self._stop_event.is_set():
+            try:
+                self._samples.append(_sample_cpu_memory(self.pid))
+            except Exception:
+                pass
+            self._stop_event.wait(self.interval)
+
+    @staticmethod
+    def _first_value(samples, key):
+        for sample in samples:
+            if sample.get(key) is not None:
+                return sample[key]
+        return None
+
+    @staticmethod
+    def _max_value(samples, key):
+        values = [sample.get(key) for sample in samples if sample.get(key) is not None]
+        return max(values) if values else None
+
+    @staticmethod
+    def _last_value(samples, key):
+        for sample in reversed(samples):
+            if sample.get(key) is not None:
+                return sample[key]
+        return None
+
+    @staticmethod
+    def _round(value):
+        return round(value, 3) if value is not None else ''
+
+    def _write_row(self, samples):
+        if not self.csv_path:
+            return
+        if not samples:
+            samples = [{}]
+        rss_peak = self._max_value(samples, 'rss')
+        total = self._first_value(samples, 'system_total')
+        row = {
+            'design_name': self.design_name,
+            'stage': self.stage,
+            'bindcraft_rss_before_mib': self._round(self._first_value(samples, 'rss')),
+            'bindcraft_rss_peak_mib': self._round(rss_peak),
+            'bindcraft_rss_after_mib': self._round(self._last_value(samples, 'rss')),
+            'system_memory_total_mib': self._round(total),
+            'bindcraft_rss_peak_percent': self._round(
+                (rss_peak / total * 100) if rss_peak is not None and total else None
+            ),
+            'status': self.status,
+            'error': self.error,
+        }
+        try:
+            create_cpu_memory_csv(self.csv_path)
+            with _CPU_MEMORY_CSV_LOCK:
+                with open(self.csv_path, 'a', newline='') as handle:
+                    csv.DictWriter(handle, fieldnames=CPU_MEMORY_STATS_COLUMNS).writerow(row)
+        except Exception as exc:
+            print(f'Warning: unable to write CPU memory statistics: {exc}')
+
+    def __enter__(self):
+        if self.csv_path:
+            try:
+                self._samples.append(_sample_cpu_memory(self.pid))
+            except Exception:
+                self._samples.append({})
+            self._thread = threading.Thread(target=self._sample_loop, daemon=True)
+            self._thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        if exc_type is not None:
+            self.status = 'failed'
+            self.error = f'{exc_type.__name__}: {exc_value}'
+        if self.csv_path:
+            self._stop_event.set()
+            if self._thread is not None:
+                self._thread.join(timeout=max(1.0, self.interval * 2))
+            try:
+                self._samples.append(_sample_cpu_memory(self.pid))
+            except Exception:
+                self._samples.append({})
+            self._write_row(self._samples)
+        return False
+
 # Define labels for dataframes
 def generate_dataframe_labels():
     # labels for trajectory

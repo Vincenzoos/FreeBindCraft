@@ -19,6 +19,7 @@ import json
 import os
 import re
 import signal
+import shlex
 import subprocess
 import threading
 import time
@@ -33,13 +34,46 @@ from IPython.display import display
 # Paths
 # ---------------------------------------------------------------------------
 
-BINDCRAFT_ROOT = Path(__file__).resolve().parent
-INPUTS_DIR = BINDCRAFT_ROOT / "inputs"
-SETTINGS_TARGET_DIR = BINDCRAFT_ROOT / "settings_target"
-SETTINGS_FILTERS_DIR = BINDCRAFT_ROOT / "settings_filters"
-SETTINGS_ADVANCED_DIR = BINDCRAFT_ROOT / "settings_advanced"
-OUTPUTS_DIR = BINDCRAFT_ROOT / "outputs"
-BINDCRAFT_SCRIPT = BINDCRAFT_ROOT / "bindcraft.py"
+def _detect_project_identity() -> Tuple[Path, Path, str, str]:
+    """Return the checkout root, entrypoint, display name, and process token."""
+    root = Path(__file__).resolve().parent
+    candidates = []
+    for filename, display_name, process_token in (
+        ("bindcraft.py", "BindCraft", "bindcraft"),
+        ("freebindcraft.py", "FreeBindCraft", "freebindcraft"),
+    ):
+        entrypoint = root / filename
+        if entrypoint.is_file():
+            candidates.append((entrypoint, display_name, process_token))
+
+    if not candidates:
+        raise FileNotFoundError(
+            f"No supported BindCraft entrypoint found in checkout: {root}"
+        )
+    if len(candidates) == 1:
+        entrypoint, display_name, process_token = candidates[0]
+        return root, entrypoint.resolve(), display_name, process_token
+
+    root_name = root.name.casefold()
+    matches = [candidate for candidate in candidates if candidate[1].casefold() == root_name]
+    if len(matches) != 1:
+        names = ", ".join(candidate[0].name for candidate in candidates)
+        raise RuntimeError(
+            f"Ambiguous BindCraft checkout {root}: found {names}; "
+            "rename the checkout or keep only its selected entrypoint."
+        )
+    entrypoint, display_name, process_token = matches[0]
+    return root, entrypoint.resolve(), display_name, process_token
+
+
+PROJECT_ROOT, PROJECT_SCRIPT, PROJECT_DISPLAY_NAME, PROJECT_PROCESS_TOKEN = (
+    _detect_project_identity()
+)
+INPUTS_DIR = PROJECT_ROOT / "inputs"
+SETTINGS_TARGET_DIR = PROJECT_ROOT / "settings_target"
+SETTINGS_FILTERS_DIR = PROJECT_ROOT / "settings_filters"
+SETTINGS_ADVANCED_DIR = PROJECT_ROOT / "settings_advanced"
+OUTPUTS_DIR = PROJECT_ROOT / "outputs"
 
 BANNER = (
     "background:#e8d5f5;padding:12px 16px;border-radius:6px;"
@@ -85,11 +119,11 @@ def _list_output_zip_options() -> List[Tuple[str, str]]:
 
 
 def _zip_outputs(selection: str, zip_name: str = "outputs.zip") -> Path:
-    """Zip OUTPUTS_DIR (or one subfolder) into BINDCRAFT_ROOT / basename(zip_name)."""
+    """Zip OUTPUTS_DIR (or one subfolder) into the project root."""
     name = (zip_name or "outputs.zip").strip() or "outputs.zip"
     if not name.lower().endswith(".zip"):
         name = f"{name}.zip"
-    dest = BINDCRAFT_ROOT / Path(name).name
+    dest = PROJECT_ROOT / Path(name).name
 
     if selection == "__all__":
         source = OUTPUTS_DIR
@@ -527,30 +561,65 @@ def _parse_process_memory_output(output: str) -> List[Tuple[int, str]]:
     return rows
 
 
-def _is_this_repo_bindcraft_process(
-    command_line: str, working_directory: Optional[str] = None
-) -> bool:
-    """True when a bindcraft.py process belongs to this FreeBindCraft install.
+def _project_process_cwd(pid: int) -> Optional[Path]:
+    """Resolve a live process' working directory through procfs."""
+    try:
+        return Path(os.readlink(f"/proc/{int(pid)}/cwd")).resolve()
+    except (FileNotFoundError, ProcessLookupError, PermissionError, OSError, RuntimeError, ValueError):
+        return None
 
-    Sibling BindCraft checkouts also run ``bindcraft.py``, so matching the
-    script name alone is not enough. Prefer an absolute path to this repo's
-    script in argv; otherwise require the process CWD to be under this root.
+
+def _command_tokens(command_line: str) -> List[str]:
+    try:
+        return shlex.split(command_line or "")
+    except ValueError:
+        return (command_line or "").split()
+
+
+def _is_this_project_process(pid: int, cmdline: str = "") -> bool:
+    """Return whether ``pid`` is a live process from this checkout.
+
+    A script path identifies the entrypoint, while procfs supplies the
+    checkout boundary.  This deliberately rejects generic Python workers,
+    same-named scripts in sibling checkouts, and shell wrappers that do not
+    contain the selected entrypoint.
     """
-    root = BINDCRAFT_ROOT.resolve()
-    script = str(BINDCRAFT_SCRIPT.resolve())
-    if script in (command_line or ""):
-        return True
-    if not working_directory:
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+
+    working_directory = _project_process_cwd(pid)
+    if working_directory is None:
         return False
     try:
-        Path(working_directory).resolve().relative_to(root)
-        return True
+        working_directory.relative_to(PROJECT_ROOT.resolve())
     except ValueError:
         return False
 
+    script_name = PROJECT_SCRIPT.name
+    script_candidates = []
+    for token in _command_tokens(cmdline):
+        token = token.strip("\"'")
+        if not token or token.startswith("-"):
+            continue
+        if Path(token).suffix.lower() == ".py":
+            script_candidates.append(token)
 
-def _bindcraft_gpu_processes_output() -> widgets.Textarea:
-    """Return a read-only table of active FreeBindCraft GPU processes."""
+    if not script_candidates:
+        return False
+    entrypoint_token = script_candidates[0]
+    token_path = Path(entrypoint_token)
+    if token_path.is_absolute():
+        try:
+            return token_path.resolve() == PROJECT_SCRIPT.resolve()
+        except (OSError, RuntimeError):
+            return False
+    return token_path.name == script_name
+
+
+def _project_gpu_processes_output() -> widgets.Textarea:
+    """Return a read-only table of active project GPU processes."""
     try:
         gpu_proc = subprocess.run(
             [
@@ -564,7 +633,7 @@ def _bindcraft_gpu_processes_output() -> widgets.Textarea:
         )
     except FileNotFoundError:
         return _readonly_textarea(
-            "nvidia-smi is unavailable; active BindCraft GPU jobs cannot be listed.",
+            f"nvidia-smi is unavailable; active {PROJECT_DISPLAY_NAME} GPU jobs cannot be listed.",
             height="130px",
         )
     except Exception as exc:
@@ -574,7 +643,10 @@ def _bindcraft_gpu_processes_output() -> widgets.Textarea:
 
     if gpu_proc.returncode != 0:
         detail = (gpu_proc.stderr or gpu_proc.stdout or "").strip()
-        message = "nvidia-smi could not list visible GPUs; active BindCraft GPU jobs cannot be listed."
+        message = (
+            "nvidia-smi could not list visible GPUs; active "
+            f"{PROJECT_DISPLAY_NAME} GPU jobs cannot be listed."
+        )
         if detail:
             message += f"\n{detail}"
         return _readonly_textarea(message, height="130px")
@@ -603,7 +675,7 @@ def _bindcraft_gpu_processes_output() -> widgets.Textarea:
             )
         except FileNotFoundError:
             return _readonly_textarea(
-                "nvidia-smi is unavailable; active BindCraft GPU jobs cannot be listed.",
+                f"nvidia-smi is unavailable; active {PROJECT_DISPLAY_NAME} GPU jobs cannot be listed.",
                 height="130px",
             )
         except Exception as exc:
@@ -648,16 +720,10 @@ def _bindcraft_gpu_processes_output() -> widgets.Textarea:
                     height="130px",
                 )
             user, process_name, command_line = ps_fields
-            if "bindcraft.py" not in command_line:
+            if not _is_this_project_process(pid, command_line):
                 continue
-            try:
-                working_directory = os.readlink(f"/proc/{pid}/cwd")
-            except Exception as exc:
-                return _readonly_textarea(
-                    f"Working directory for PID {pid} could not be read: {exc}",
-                    height="130px",
-                )
-            if not _is_this_repo_bindcraft_process(command_line, working_directory):
+            working_directory = _project_process_cwd(pid)
+            if working_directory is None:
                 continue
             rows.append(
                 (
@@ -672,7 +738,7 @@ def _bindcraft_gpu_processes_output() -> widgets.Textarea:
 
     if not rows:
         return _readonly_textarea(
-            "No active FreeBindCraft jobs are currently using GPU memory.",
+            f"No active {PROJECT_DISPLAY_NAME} jobs are currently using GPU memory.",
             height="130px",
         )
 
@@ -704,6 +770,208 @@ def _bindcraft_gpu_processes_output() -> widgets.Textarea:
 
     lines = [header, separator, *formatted_rows]
     return _readonly_textarea("\n".join(lines), height="130px")
+
+
+def _read_proc_meminfo() -> Dict[str, int]:
+    """Read selected /proc/meminfo values in KiB."""
+    values: Dict[str, int] = {}
+    with open("/proc/meminfo", "r", encoding="utf-8") as handle:
+        for line in handle:
+            key, separator, raw = line.partition(":")
+            if not separator:
+                continue
+            match = re.search(r"\d+", raw)
+            if match:
+                values[key] = int(match.group(0))
+    return values
+
+
+def _format_memory_kib(value: Any) -> str:
+    """Format KiB using compact htop-like units."""
+    try:
+        amount = float(value)
+    except (TypeError, ValueError):
+        return "?"
+    if amount < 1024:
+        return f"{amount:.0f}K"
+    if amount < 1024**2:
+        return f"{amount / 1024:.1f}M"
+    return f"{amount / (1024**2):.1f}G"
+
+
+def _project_system_snapshot_output() -> widgets.Textarea:
+    """Return an htop-style, machine-wide CPU and memory snapshot."""
+    try:
+        meminfo = _read_proc_meminfo()
+    except (OSError, ValueError) as exc:
+        return _readonly_textarea(
+            f"/proc/meminfo is unavailable; CPU and memory details cannot be displayed.\n{exc}",
+            height="420px",
+        )
+
+    try:
+        load_average = os.getloadavg()
+        cpu_count = os.cpu_count() or 1
+    except OSError as exc:
+        return _readonly_textarea(
+            f"System load information is unavailable: {exc}", height="420px"
+        )
+
+    try:
+        ps_proc = subprocess.run(
+            [
+                "ps",
+                "-eo",
+                "pid=,user=,stat=,pcpu=,pmem=,rss=,etime=,time=,args=",
+                "--sort=-pcpu",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        return _readonly_textarea(
+            "ps is unavailable; CPU process details cannot be displayed.",
+            height="420px",
+        )
+    except Exception as exc:
+        return _readonly_textarea(f"Unable to read process data: {exc}", height="420px")
+    if ps_proc.returncode != 0:
+        detail = (ps_proc.stderr or ps_proc.stdout or "").strip()
+        message = f"ps could not read process data (exit code {ps_proc.returncode})."
+        if detail:
+            message += f"\n{detail}"
+        return _readonly_textarea(message, height="420px")
+
+    process_rows = []
+    for line in (ps_proc.stdout or "").splitlines():
+        fields = line.strip().split(None, 8)
+        if len(fields) < 8:
+            continue
+        process_rows.append(fields)
+
+    total = meminfo.get("MemTotal")
+    available = meminfo.get("MemAvailable", meminfo.get("MemFree"))
+    swap_total = meminfo.get("SwapTotal", 0)
+    swap_free = meminfo.get("SwapFree", 0)
+    if total is None or available is None:
+        return _readonly_textarea(
+            "MemTotal or MemAvailable is missing from /proc/meminfo; memory details cannot be displayed.",
+            height="420px",
+        )
+    used = max(0, total - available)
+    swap_used = max(0, swap_total - swap_free)
+    lines = [
+        "htop-style CPU and memory snapshot (refresh to update)",
+        f"CPU cores: {cpu_count}    Load average: {load_average[0]:.2f} {load_average[1]:.2f} {load_average[2]:.2f}",
+        f"Mem: {_format_memory_kib(used)} used / {_format_memory_kib(total)} total",
+        f"Swp: {_format_memory_kib(swap_used)} used / {_format_memory_kib(swap_total)} total",
+        f"Tasks: {len(process_rows)}",
+        "",
+        f"{'PID':>7} {'USER':<16} {'STAT':<6} {'CPU%':>6} {'MEM%':>6} {'RES':>9} {'TIME+':>10} COMMAND",
+        "-" * 120,
+    ]
+    for fields in process_rows[:30]:
+        pid, user, stat, pcpu, pmem, rss, elapsed, cpu_time = fields[:8]
+        command = fields[8] if len(fields) > 8 else ""
+        if len(command) > 76:
+            command = command[:73] + "..."
+        lines.append(
+            f"{pid:>7} {user:<16.16} {stat:<6.6} {pcpu:>6} {pmem:>6} "
+            f"{_format_memory_kib(rss):>9} {cpu_time:>10} {command}"
+        )
+    return _readonly_textarea("\n".join(lines), height="420px")
+
+
+def _project_cpu_processes_output() -> widgets.Textarea:
+    """Return a repository-scoped table of active CPU/memory jobs."""
+    if not Path("/proc").is_dir():
+        return _readonly_textarea(
+            f"/proc is unavailable; active {PROJECT_DISPLAY_NAME} CPU jobs cannot be listed.",
+            height="160px",
+        )
+    try:
+        ps_proc = subprocess.run(
+            ["ps", "-eo", "pid=,user=,comm=,pcpu=,pmem=,rss=,etime=,time=,args="],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        return _readonly_textarea(
+            f"ps is unavailable; active {PROJECT_DISPLAY_NAME} CPU jobs cannot be listed.",
+            height="160px",
+        )
+    except Exception as exc:
+        return _readonly_textarea(f"Unable to read CPU process data: {exc}", height="160px")
+    if ps_proc.returncode != 0:
+        detail = (ps_proc.stderr or ps_proc.stdout or "").strip()
+        message = (
+            f"ps could not list active {PROJECT_DISPLAY_NAME} CPU jobs "
+            f"(exit code {ps_proc.returncode})."
+        )
+        if detail:
+            message += f"\n{detail}"
+        return _readonly_textarea(message, height="160px")
+
+    rows = []
+    for line in (ps_proc.stdout or "").splitlines():
+        fields = line.strip().split(None, 8)
+        if len(fields) < 8:
+            continue
+        try:
+            pid = int(fields[0])
+        except ValueError:
+            continue
+        command_line = fields[8] if len(fields) > 8 else ""
+        if PROJECT_PROCESS_TOKEN not in command_line and PROJECT_SCRIPT.name not in command_line:
+            continue
+        if not _is_this_project_process(pid, command_line):
+            continue
+        cwd = _project_process_cwd(pid)
+        if cwd is None:
+            continue
+        rows.append(
+            (
+                pid,
+                fields[1],
+                fields[2],
+                fields[3],
+                fields[4],
+                _format_memory_kib(fields[5]),
+                fields[6],
+                fields[7],
+                str(cwd),
+            )
+        )
+
+    if not rows:
+        return _readonly_textarea(
+            f"No active {PROJECT_DISPLAY_NAME} jobs are currently using CPU resources.",
+            height="160px",
+        )
+
+    def _cpu_sort_key(row):
+        try:
+            return float(row[3].replace(",", "."))
+        except (AttributeError, TypeError, ValueError):
+            return 0.0
+
+    rows.sort(key=_cpu_sort_key, reverse=True)
+    widths = (8, 14, 18, 7, 7, 9, 12, 12, 48)
+    headings = ("PID", "USER", "PROCESS", "CPU%", "MEM%", "RSS", "ELAPSED", "TIME+", "CWD")
+    header = "".join(f"{heading:<{width}}" for heading, width in zip(headings, widths)).rstrip()
+    separator = "-" * len(header)
+    formatted = [header, separator]
+    for row in rows:
+        cells = []
+        for value, width in zip(row, widths):
+            value = str(value)
+            if len(value) > width:
+                value = value[: max(0, width - 3)] + "..."
+            cells.append(f"{value:<{width}}")
+        formatted.append("".join(cells).rstrip())
+    return _readonly_textarea("\n".join(formatted), height="160px")
 
 def _load_target_progress_meta(target_json_name: str) -> tuple[Path, int]:
     """Return (design_path, number_of_final_designs) from a settings_target JSON."""
@@ -776,7 +1044,7 @@ def _extract_settings_path_from_cmd(cmdline: str) -> Optional[Path]:
 
 
 def _discover_running_jobs() -> Dict[str, Dict[str, Any]]:
-    """Discover running jobs from tmux + active bindcraft.py processes."""
+    """Discover running jobs from tmux and active project processes."""
     discovered: Dict[str, Dict[str, Any]] = {}
 
     # 1) tmux sessions named as job folders
@@ -794,9 +1062,13 @@ def _discover_running_jobs() -> Dict[str, Dict[str, Any]]:
     except Exception:
         pass
 
-    # 2) live bindcraft.py processes from this repo (covers non-tmux legacy runs)
+    # 2) live entrypoint processes from this repo (covers non-tmux legacy runs)
     try:
-        proc = subprocess.run(["pgrep", "-af", "python.*bindcraft.py"], capture_output=True, text=True)
+        proc = subprocess.run(
+            ["pgrep", "-af", PROJECT_SCRIPT.name],
+            capture_output=True,
+            text=True,
+        )
         if proc.returncode == 0:
             for line in proc.stdout.splitlines():
                 line = line.strip()
@@ -807,17 +1079,13 @@ def _discover_running_jobs() -> Dict[str, Dict[str, Any]]:
                     continue
                 pid = int(parts[0])
                 cmd = parts[1]
-                try:
-                    cwd = os.readlink(f"/proc/{pid}/cwd")
-                except Exception:
-                    cwd = None
-                if not _is_this_repo_bindcraft_process(cmd, cwd):
+                if not _is_this_project_process(pid, cmd):
                     continue
                 settings_path = _extract_settings_path_from_cmd(cmd)
                 if settings_path is None:
                     continue
                 if not settings_path.is_absolute():
-                    settings_path = (BINDCRAFT_ROOT / settings_path).resolve()
+                    settings_path = (PROJECT_ROOT / settings_path).resolve()
                 if not settings_path.is_file():
                     continue
                 try:
@@ -894,10 +1162,12 @@ def _refresh_running_job_names() -> List[str]:
 
 
 def launch_all_ui() -> None:
-    """Build and display the FreeBindCraft ipywidgets UI inline in the notebook."""
+    """Build and display the project ipywidgets UI inline in the notebook."""
     _ensure_dirs()
-    if not BINDCRAFT_SCRIPT.exists():
-        raise FileNotFoundError(f"bindcraft.py not found at {BINDCRAFT_SCRIPT}")
+    if not PROJECT_SCRIPT.exists():
+        raise FileNotFoundError(
+            f"{PROJECT_DISPLAY_NAME} entrypoint not found at {PROJECT_SCRIPT}"
+        )
 
     state: Dict[str, Any] = {
         "job_name": None,
@@ -909,12 +1179,12 @@ def launch_all_ui() -> None:
     welcome = widgets.HTML(
         f"""
         <div style="{BANNER}">
-          <h2 style="margin:0 0 8px 0;">FreeBindCraft Workflow</h2>
+          <h2 style="margin:0 0 8px 0;">{PROJECT_DISPLAY_NAME} Workflow</h2>
           <ul style="margin:0;padding-left:1em;list-style:none;">
             <li style="margin:2px 0;"><b>Step 1:</b> Upload a target PDB file.</li>
             <li style="margin:2px 0;"><b>Step 2:</b> Upload or create a settings target JSON file.</li>
             <li style="margin:2px 0;"><b>Steps 3–6:</b> Select settings target JSON, filters, and advanced
-                settings; generate the run script, then Run BindCraft.</li>
+                settings; generate the run script, then run {PROJECT_DISPLAY_NAME}.</li>
             <li style="margin:2px 0;"><b>Step 7:</b> Zip outputs for download.</li>
           </ul>
         </div>
@@ -1248,7 +1518,7 @@ def launch_all_ui() -> None:
 
     # --- Target JSON selectors (job name = design_path folder) ---
     job_banner = _banner(
-        "Step 3–6: Select your settings files and run FreeBindCraft"
+        f"Step 3–6: Select your settings files and run {PROJECT_DISPLAY_NAME}"
     )
     job_help = widgets.HTML(
         f"<p><b>Job name</b> is taken from the target JSON <code>design_path</code> folder "
@@ -1365,7 +1635,7 @@ def launch_all_ui() -> None:
         style={"description_width": "120px"},
     )
 
-    options_banner = _banner("FreeBindCraft options")
+    options_banner = _banner(f"{PROJECT_DISPLAY_NAME} options")
     gpu_opts = _list_gpu_options()
     # Prefer freest GPU if available (skip Auto entry)
     default_gpu = ""
@@ -1398,7 +1668,7 @@ def launch_all_ui() -> None:
         layout=widgets.Layout(width="180px"),
     )
     gpu_status = widgets.HTML(
-        "<span style='color:#555;'>Sets <code>CUDA_VISIBLE_DEVICES</code> for the FreeBindCraft job. "
+        f"<span style='color:#555;'>Sets <code>CUDA_VISIBLE_DEVICES</code> for the {PROJECT_DISPLAY_NAME} job. "
         "Memory values are point-in-time snapshots; use Refresh GPU list to update them.</span>"
     )
 
@@ -1423,13 +1693,30 @@ def launch_all_ui() -> None:
         indent=False,
     )
     tracking_help = widgets.HTML(
-        "<p style='color:#555;margin-top:0;'>When enabled, FreeBindCraft appends per-stage "
+        f"<p style='color:#555;margin-top:0;'>When enabled, {PROJECT_DISPLAY_NAME} appends per-stage "
         "memory measurements to <code>gpu_memory_stats.csv</code> in the design folder. "
-        "Tracking is off by default.</p>"
+    )
+
+    track_cpu_memory_w = widgets.Checkbox(
+        value=False,
+        description="Track CPU memory usage",
+        indent=False,
+    )
+    cpu_tracking_help = widgets.HTML(
+        f"<p style='color:#555;margin-top:0;'>When enabled, {PROJECT_DISPLAY_NAME} appends per-stage "
+        "resident-memory measurements to <code>cpu_memory_stats.csv</code> in the design folder. "
     )
 
     nvidia_smi_panel = _nvidia_smi_output()
-    bindcraft_gpu_processes_panel = _bindcraft_gpu_processes_output()
+    project_gpu_processes_panel = _project_gpu_processes_output()
+    htop_panel = _project_system_snapshot_output()
+    project_cpu_processes_panel = _project_cpu_processes_output()
+    refresh_cpu_btn = widgets.Button(
+        description="Refresh CPU stats",
+        icon="refresh",
+        button_style="info",
+        layout=widgets.Layout(width="180px"),
+    )
     nvidia_smi_heading = widgets.HTML(
         "<b>nvidia-smi details for the current selection</b>"
     )
@@ -1441,22 +1728,34 @@ def launch_all_ui() -> None:
         "<b>Perf</b> is the performance state (P0 is high performance). The "
         "<b>Processes</b> section shows programs currently using GPU memory.</p>"
     )
-    bindcraft_gpu_processes_heading = widgets.HTML(
-        "<b>Active FreeBindCraft jobs using GPU memory</b>"
+    project_gpu_processes_heading = widgets.HTML(
+        f"<b>Active {PROJECT_DISPLAY_NAME} jobs using GPU memory</b>"
     )
-    bindcraft_gpu_processes_help = widgets.HTML(
-        "<p><b>Active FreeBindCraft jobs:</b> This table shows only FreeBindCraft processes currently "
+    project_gpu_processes_help = widgets.HTML(
+        f"<p><b>Active {PROJECT_DISPLAY_NAME} jobs:</b> This table shows only {PROJECT_DISPLAY_NAME} processes currently "
         "using GPU memory. <b>GPU</b> is the GPU number, <b>PID</b> identifies the running "
         "process, <b>User</b> is the account running it, <b>Process</b> is the program name, "
         "<b>CWD</b> shows the project folder it is running from, and <b>GPU Memory</b> "
-        "shows how much memory that job is using. If the table is empty, no FreeBindCraft job is "
+        f"shows how much memory that job is using. If the table is empty, no {PROJECT_DISPLAY_NAME} job is "
         "currently using a GPU.</p>"
+    )
+    htop_heading = widgets.HTML("<b>htop details for the current machine</b>")
+    project_cpu_processes_heading = widgets.HTML(
+        f"<b>Active {PROJECT_DISPLAY_NAME} jobs using CPU and memory</b>"
+    )
+    project_cpu_processes_help = widgets.HTML(
+        f"<p><b>Active {PROJECT_DISPLAY_NAME} jobs:</b> This table shows only processes running "
+        f"the current {PROJECT_DISPLAY_NAME} entrypoint from this checkout. It reports PID, user, "
+        "process, CPU%, MEM%, resident memory (RSS), elapsed time, and working directory. "
+        f"Unrelated Python processes and jobs from other {PROJECT_DISPLAY_NAME} checkouts are excluded.</p>"
     )
 
     def refresh_monitoring_panels(_=None):
-        """Refresh both read-only GPU monitoring reports."""
+        """Refresh all read-only GPU and CPU monitoring reports."""
         nvidia_smi_panel.value = _nvidia_smi_output().value
-        bindcraft_gpu_processes_panel.value = _bindcraft_gpu_processes_output().value
+        project_gpu_processes_panel.value = _project_gpu_processes_output().value
+        htop_panel.value = _project_system_snapshot_output().value
+        project_cpu_processes_panel.value = _project_cpu_processes_output().value
 
     def on_gpu_selection_change(change):
         if change.get("name") != "value" or change.get("new") == change.get("old"):
@@ -1473,6 +1772,7 @@ def launch_all_ui() -> None:
         refresh_monitoring_panels()
 
     refresh_gpu_btn.on_click(on_refresh_gpu)
+    refresh_cpu_btn.on_click(refresh_monitoring_panels)
 
     rank_by_w = widgets.Dropdown(
         options=["i_pTM", "ipSAE"],
@@ -1500,7 +1800,7 @@ def launch_all_ui() -> None:
         "<code>settings_advanced</code> file, then generate the run script.</p>"
     )
     generate_btn = widgets.Button(
-        description="Generate FreeBindCraft Run Script with Settings",
+        description=f"Generate {PROJECT_DISPLAY_NAME} Run Script with Settings",
         button_style="success",
         layout=widgets.Layout(width="70%", height="42px"),
     )
@@ -1527,7 +1827,7 @@ def launch_all_ui() -> None:
         cmd = [
             "python",
             "-u",
-            str(BINDCRAFT_SCRIPT),
+            str(PROJECT_SCRIPT),
             "--settings",
             str(SETTINGS_TARGET_DIR / state["target_json"]),
             "--filters",
@@ -1547,6 +1847,8 @@ def launch_all_ui() -> None:
             cmd.append("--no-animations")
         if track_gpu_memory_w.value:
             cmd.append("--gpu-memory-tracking")
+        if track_cpu_memory_w.value:
+            cmd.append("--cpu-memory-tracking")
         return cmd
 
     def on_generate(_):
@@ -1565,8 +1867,12 @@ def launch_all_ui() -> None:
                     "GPU memory tracking: "
                     + ("enabled" if track_gpu_memory_w.value else "disabled")
                 )
+                print(
+                    "CPU memory tracking: "
+                    + ("enabled" if track_cpu_memory_w.value else "disabled")
+                )
                 print(" \\\n  ".join(cmd))
-                print("\nReady. Press Run FreeBindCraft to start.")
+                print(f"\nReady. Press Run {PROJECT_DISPLAY_NAME} to start.")
         except Exception as e:
             with script_preview:
                 print(f"Error: {e}")
@@ -1575,11 +1881,11 @@ def launch_all_ui() -> None:
 
     # --- Run / Abort ---
     run_help = widgets.HTML(
-        "<p>Press <b>Run FreeBindCraft</b> to start the job in a detached <code>tmux</code> session "
+        f"<p>Press <b>Run {PROJECT_DISPLAY_NAME}</b> to start the job in a detached <code>tmux</code> session "
         "(survives notebook kernel death). Reattach with <code>tmux attach -t &lt;job&gt;</code>.</p>"
     )
     run_btn = widgets.Button(
-        description="Run FreeBindCraft",
+        description=f"Run {PROJECT_DISPLAY_NAME}",
         button_style="primary",
         layout=widgets.Layout(width="70%", height="48px"),
     )
@@ -1940,13 +2246,13 @@ def launch_all_ui() -> None:
                 "#!/usr/bin/env bash\n"
                 "set -uo pipefail\n"
                 "cd "
-                + json.dumps(str(BINDCRAFT_ROOT))
+                + json.dumps(str(PROJECT_ROOT))
                 + "\n"
                 + cuda_export
                 + "export PYTHONUNBUFFERED=1\n"
                 + f"LOG_FILE={json.dumps(str(log_path))}\n"
                 + f"EXIT_FILE={json.dumps(str(exit_path))}\n"
-                + "echo \"[tmux] starting FreeBindCraft in session\" | tee -a \"$LOG_FILE\"\n"
+                + f"echo \"[tmux] starting {PROJECT_DISPLAY_NAME} in session\" | tee -a \"$LOG_FILE\"\n"
                 + "set +e\n"
                 + " ".join(json.dumps(c) for c in cmd)
                 + " 2>&1 | tee -a \"$LOG_FILE\"\n"
@@ -2202,12 +2508,20 @@ def launch_all_ui() -> None:
             gpu_status,
             track_gpu_memory_w,
             tracking_help,
+            track_cpu_memory_w,
+            cpu_tracking_help,
             nvidia_smi_heading,
             nvidia_smi_help,
             nvidia_smi_panel,
-            bindcraft_gpu_processes_heading,
-            bindcraft_gpu_processes_help,
-            bindcraft_gpu_processes_panel,
+            project_gpu_processes_heading,
+            project_gpu_processes_help,
+            project_gpu_processes_panel,
+            htop_heading,
+            htop_panel,
+            project_cpu_processes_heading,
+            project_cpu_processes_help,
+            project_cpu_processes_panel,
+            widgets.HBox([refresh_cpu_btn]),
             rank_by_w,
             rank_by_help,
             widgets.HBox([verbose_w, no_plots_w, no_anims_w]),

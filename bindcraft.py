@@ -6,7 +6,9 @@ import gc
 from contextlib import nullcontext
 from functions import *
 from functions.generic_utils import (
+    CpuMemoryTracker,
     GpuMemoryTracker,
+    create_cpu_memory_csv,
     create_gpu_memory_stats_csv,
     insert_data,
 ) # Explicit imports for CSV/tracking helpers
@@ -91,6 +93,8 @@ parser.add_argument('--no-animations', action='store_true',
                     help='Disable saving design animations (overrides advanced settings)')
 parser.add_argument('--gpu-memory-tracking', action='store_true',
                     help='Track GPU memory for major pipeline stages in gpu_memory_stats.csv')
+parser.add_argument('--cpu-memory-tracking', action='store_true',
+                    help='Track CPU RSS for major pipeline stages in cpu_memory_stats.csv')
 parser.add_argument('--interactive', action='store_true',
                     help='Force interactive mode to collect target settings and options')
 parser.add_argument('--rank-by', type=str, default='i_pTM',
@@ -418,12 +422,26 @@ gpu_memory_stats_csv = (
 if gpu_memory_stats_csv:
     create_gpu_memory_stats_csv(gpu_memory_stats_csv)
 
+cpu_memory_stats_csv = (
+    os.path.join(target_settings["design_path"], 'cpu_memory_stats.csv')
+    if args.cpu_memory_tracking else None
+)
+if cpu_memory_stats_csv:
+    create_cpu_memory_csv(cpu_memory_stats_csv)
+
 
 def _gpu_memory_stage(design, stage):
     """Return a tracker when enabled, otherwise a zero-cost context manager."""
     if gpu_memory_stats_csv is None:
         return nullcontext()
     return GpuMemoryTracker(gpu_memory_stats_csv, design=design, stage=stage)
+
+
+def _cpu_memory_stage(design, stage):
+    """Return a CPU tracker when enabled, otherwise a zero-cost context manager."""
+    if cpu_memory_stats_csv is None:
+        return nullcontext()
+    return CpuMemoryTracker(cpu_memory_stats_csv, design_name=design, stage=stage)
 
 ### generate dataframes
 trajectory_labels, design_labels, final_labels = generate_dataframe_labels()
@@ -538,7 +556,7 @@ while True:
         print("Starting trajectory: "+design_name)
 
         ### Begin binder hallucination
-        with _gpu_memory_stage(design_name, 'trajectory_backbone_generation'):
+        with _gpu_memory_stage(design_name, 'trajectory_backbone_generation'), _cpu_memory_stage(design_name, 'trajectory_backbone_generation'):
             trajectory = binder_hallucination(design_name, target_settings["starting_pdb"], target_settings["chains"],
                                                 target_settings["target_hotspot_residues"], length, seed, helicity_value,
                                                 design_models, advanced_settings, design_paths, failure_csv)
@@ -608,7 +626,7 @@ while True:
                 design_start_time = time.time()
 
                 ### MPNN redesign of starting binder
-                with _gpu_memory_stage(design_name, 'mpnn_generation'):
+                with _gpu_memory_stage(design_name, 'mpnn_generation'), _cpu_memory_stage(design_name, 'mpnn_generation'):
                     mpnn_trajectories = mpnn_gen_sequence(trajectory_pdb, binder_chain, trajectory_interface_residues, advanced_settings)
                 
                 existing_mpnn_sequences = set()
@@ -682,14 +700,16 @@ while True:
                             save_fasta(mpnn_design_name, mpnn_sequence['seq'], design_paths)
                         
                         ### Predict mpnn redesigned binder complex using masked templates
-                        with _gpu_memory_stage(mpnn_design_name, 'complex_prediction') as complex_tracker:
+                        with _gpu_memory_stage(mpnn_design_name, 'complex_prediction') as gpu_complex_tracker, _cpu_memory_stage(mpnn_design_name, 'complex_prediction') as cpu_complex_tracker:
                             mpnn_complex_statistics, pass_af2_filters, early_filter_details = predict_binder_complex(complex_prediction_model,
                                                                                                     mpnn_sequence['seq'], mpnn_design_name,
                                                                                                     target_settings["starting_pdb"], target_settings["chains"],
                                                                                                     length, trajectory_pdb, prediction_models, advanced_settings,
                                                                                                     filters, design_paths, failure_csv, use_pyrosetta=use_pyrosetta)
-                            if not pass_af2_filters and hasattr(complex_tracker, 'set_status'):
-                                complex_tracker.set_status('filter_failed')
+                            if not pass_af2_filters:
+                                for tracker in (gpu_complex_tracker, cpu_complex_tracker):
+                                    if hasattr(tracker, 'set_status'):
+                                        tracker.set_status('filter_failed')
 
                         # if AF2 filters are not passed then skip the scoring but log the failure
                         if not pass_af2_filters:
@@ -782,7 +802,7 @@ while True:
                         mpnn_complex_averages = calculate_averages(mpnn_complex_statistics, handle_aa=True)
                         
                         ### Predict binder alone in single sequence mode
-                        with _gpu_memory_stage(mpnn_design_name, 'binder_only_prediction'):
+                        with _gpu_memory_stage(mpnn_design_name, 'binder_only_prediction'), _cpu_memory_stage(mpnn_design_name, 'binder_only_prediction'):
                             binder_statistics = predict_binder_alone(binder_prediction_model, mpnn_sequence['seq'], mpnn_design_name, length,
                                                                     trajectory_pdb, binder_chain, prediction_models, advanced_settings, design_paths,
                                                                     use_pyrosetta=use_pyrosetta)
